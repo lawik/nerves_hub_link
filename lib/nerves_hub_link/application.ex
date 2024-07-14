@@ -6,6 +6,7 @@ defmodule NervesHubLink.Application do
   alias NervesHubLink.Configurator
   alias NervesHubLink.Socket
   alias NervesHubLink.FwupConfig
+  alias NervesHubLink.PubSub
   alias NervesHubLink.UpdateManager
 
   def start(_type, _args) do
