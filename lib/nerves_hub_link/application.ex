@@ -25,12 +25,13 @@ defmodule NervesHubLink.Application do
         }
 
         [
+          PubSub,
           {UpdateManager, fwup_config},
           {ArchiveManager, config},
           {Socket, config}
         ]
       else
-        []
+        [PubSub]
       end
 
     Supervisor.start_link(children, strategy: :one_for_one, name: NervesHubLink.Supervisor)
