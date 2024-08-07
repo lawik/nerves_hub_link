@@ -78,7 +78,7 @@ defmodule NervesHubLink.MixProject do
 
   defp deps do
     [
-      {:castore, "~> 0.1 or ~> 1.0", optional: true},
+      {:castore, "~> 0.1 or ~> 1.0", optional: true, override: true},
       {:credo, "~> 1.2", only: :test, runtime: false},
       {:dialyxir, "~> 1.1", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.10", only: :test},
@@ -94,7 +94,8 @@ defmodule NervesHubLink.MixProject do
       {:plug_crypto, "~> 2.0"},
       {:plug_cowboy, "~> 2.0", only: :test},
       {:slipstream, "~> 1.0 or ~> 0.8"},
-      {:x509, "~> 0.5"}
+      {:x509, "~> 0.5"},
+      {:peppermint, "~> 0.3.1"}
     ]
   end
 end

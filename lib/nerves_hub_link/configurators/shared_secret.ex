@@ -21,7 +21,14 @@ defmodule NervesHubLink.Configurator.SharedSecret do
   Generate headers for Shared Secret Auth
   """
   @spec headers(Config.t()) :: [{String.t(), String.t()}]
-  def headers(%{shared_secret: shared_secret}) do
+  def headers(%{shared_secret: shared_secret, socket: socket} = config) do
+    url = Map.merge(socket[:url], %{scheme: "https", path: "/api/time"})
+    keyword_config = config |> Map.from_struct() |> Enum.to_list()
+    {:ok, %{body: body}} = Peppermint.get(url, keyword_config)
+    %{"time" => time} = Jason.decode!(body)
+    IO.inspect(config, label: "config")
+    IO.puts("Signing =====================================================")
+
     opts =
       (shared_secret || [])
       |> Keyword.put_new(:key_digest, :sha256)
@@ -29,7 +36,8 @@ defmodule NervesHubLink.Configurator.SharedSecret do
       |> Keyword.put_new(:key_length, 32)
       |> Keyword.put_new(:signature_version, "NH1")
       |> Keyword.put_new(:identifier, Nerves.Runtime.serial_number())
-      |> Keyword.put(:signed_at, System.system_time(:second))
+      |> Keyword.put(:signed_at, time)
+      |> IO.inspect(label: "opts")
 
     alg =
       "#{opts[:signature_version]}-HMAC-#{opts[:key_digest]}-#{opts[:key_iterations]}-#{opts[:key_length]}"
