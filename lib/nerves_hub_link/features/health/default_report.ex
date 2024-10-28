@@ -37,8 +37,10 @@ defmodule NervesHubLink.Features.Health.DefaultReport do
     [
       metrics_from_config(),
       cpu_temperature(),
+      cpu_utilization(),
       load_averages(),
-      memory()
+      memory(),
+      disk()
     ]
     |> Enum.reduce(%{}, &Map.merge/2)
   end
@@ -101,6 +103,29 @@ defmodule NervesHubLink.Features.Health.DefaultReport do
     end
   end
 
+  defp cpu_utilization do
+    case Application.ensure_all_started(:os_mon) do
+      {:ok, _} ->
+        cpu_util()
+
+      {:error, {:already_started, _}} ->
+        cpu_util()
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp cpu_util do
+    case :cpu_sup.util([]) do
+      {:all, usage, _} ->
+        %{cpu_usage_percent: usage}
+
+      _ ->
+        %{}
+    end
+  end
+
   defp cpu_temperature_rpi do
     with {result, 0} <- System.cmd("/usr/bin/vcgencmd", ["measure_temp"]) do
       %{"temp" => temp} = Regex.named_captures(~r/temp=(?<temp>[\d.]+)/, result)
@@ -133,6 +158,38 @@ defmodule NervesHubLink.Features.Health.DefaultReport do
     used_percent = round(used_mb / size_mb * 100)
 
     %{size_mb: size_mb, used_mb: used_mb, used_percent: used_percent}
+  end
+
+  defp disk do
+    case Application.ensure_all_started(:os_mon) do
+      {:ok, _} ->
+        disk_info()
+
+      {:error, {:already_started, _}} ->
+        disk_info()
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp disk_info do
+    data =
+      Enum.find(:disksup.get_disk_info(), fn {key, _, _, _} ->
+        key == ~c"/root"
+      end)
+
+    case data do
+      nil ->
+        %{}
+
+      {_, total_kb, available_kb, capacity_percentage} ->
+        %{
+          disk_total_kb: total_kb,
+          disk_available_kb: available_kb,
+          disk_used_percentage: capacity_percentage
+        }
+    end
   end
 
   def vintage_net() do
