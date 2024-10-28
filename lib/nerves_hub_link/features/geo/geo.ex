@@ -7,13 +7,8 @@ defmodule NervesHubLink.Features.Geo do
 
   @impl GenServer
   def init(_opts) do
-    {:ok, %{}, {:continue, :location_update}}
-  end
-
-  @impl GenServer
-  def handle_continue(:location_update, state) do
-    _ = location_update()
-    {:noreply, state}
+    # Does not send an initial report, server reports one
+    {:ok, %{}}
   end
 
   @impl NervesHubLink.Features
