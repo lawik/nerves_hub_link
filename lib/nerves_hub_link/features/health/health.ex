@@ -1,8 +1,6 @@
 defmodule NervesHubLink.Features.Health do
   use NervesHubLink.Features, name: "health", version: "0.0.1"
 
-  use GenServer
-
   alias NervesHubLink.Features.Health.DefaultReport
   alias NervesHubLink.Features.Health.DeviceStatus
 
