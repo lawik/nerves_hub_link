@@ -17,7 +17,7 @@ defmodule NervesHubLink.Features.Geo do
   end
 
   @impl NervesHubLink.Features
-  def handle_event("location:update", _msg, state) do
+  def handle_event("location:request", _msg, state) do
     _ = location_update()
     {:noreply, state}
   end
