@@ -10,9 +10,6 @@ defmodule NervesHubLink.Downloader do
 
   Using this information, it can restart a download using the
   [`Range` HTTP header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Range).
-
-  This process's **only** focus is obtaining data reliably. It doesn't have any
-  side effects on the system.
   """
 
   use GenServer
@@ -22,6 +19,11 @@ defmodule NervesHubLink.Downloader do
 
   defstruct uri: nil,
             conn: nil,
+            download_id: nil,
+            persist_to: nil,
+            streaming?: true,
+            file: nil,
+            file_bytes: 0,
             request_ref: nil,
             status: nil,
             response_headers: [],
@@ -35,7 +37,7 @@ defmodule NervesHubLink.Downloader do
             worst_case_timeout: nil,
             worst_case_timeout_remaining_ms: nil
 
-  @type handler_event :: {:data, binary()} | {:error, any()} | :complete
+  @type handler_event :: {:data, binary()} | {:error, any()} | :complete | :expired
   @type event_handler_fun :: (handler_event -> any())
   @type retry_args :: RetryConfig.t()
 
@@ -45,6 +47,11 @@ defmodule NervesHubLink.Downloader do
   @type t :: %Downloader{
           uri: nil | URI.t(),
           conn: nil | Mint.HTTP.t(),
+          download_id: nil | String.t(),
+          persist_to: nil | String.t(),
+          streaming?: boolean(),
+          file: nil | File.io_device() | File.file_descriptor(),
+          file_bytes: non_neg_integer(),
           request_ref: nil | reference(),
           status: nil | Mint.Types.status(),
           response_headers: Mint.Types.headers(),
@@ -62,6 +69,7 @@ defmodule NervesHubLink.Downloader do
   @type initialized_download :: %Downloader{
           uri: URI.t(),
           conn: Mint.HTTP.t(),
+          download_id: String.t(),
           request_ref: reference(),
           status: nil | Mint.Types.status(),
           response_headers: Mint.Types.headers(),
@@ -73,6 +81,8 @@ defmodule NervesHubLink.Downloader do
 
   # todo, this should be `t`, but with retry_timeout
   @type resume_rescheduled :: t()
+
+  @default_persist_to "/data/firmware-update"
 
   @doc """
   Begins downloading a file at `url` handled by `fun`.
@@ -91,31 +101,44 @@ defmodule NervesHubLink.Downloader do
         iex> flush()
         :complete
   """
-  @spec start_download(String.t() | URI.t(), event_handler_fun()) :: GenServer.on_start()
-  def start_download(url, fun) when is_function(fun, 1) do
+  @spec start_download(String.t() | URI.t(), event_handler_fun(), keyword()) :: GenServer.on_start()
+  def start_download(url, download_id, fun, opts \\ []) when is_function(fun, 1) do
+    rc = Application.get_env(
+      :nerves_hub_link,
+      :retry_config,
+      # Legacy compatibility
+      Application.get_env(:nerves_hub_link_common, :retry_config, [])
+    )
     retry_config =
-      struct(RetryConfig, Application.get_env(:nerves_hub_link_common, :retry_config, []))
+      struct(RetryConfig, rc)
 
-    GenServer.start_link(__MODULE__, [URI.parse(url), fun, retry_config])
+    start_download(url, download_id, fun, retry_config, opts)
   end
 
-  @spec start_download(String.t() | URI.t(), event_handler_fun(), RetryConfig.t()) ::
+  @spec start_download(String.t() | URI.t(), String.t(), event_handler_fun(), RetryConfig.t(), keyword()) ::
           GenServer.on_start()
-  def start_download(url, fun, %RetryConfig{} = retry_args) when is_function(fun, 1) do
-    GenServer.start_link(__MODULE__, [URI.parse(url), fun, retry_args])
+          def start_download(url, download_id, fun, %RetryConfig{} = retry_config, opts) when is_function(fun, 1) do
+            GenServer.start_link(__MODULE__, %{uri: URI.parse(url), download_id: download_id, handle: fun, retry_config: retry_config, opts: opts})
   end
 
   @impl GenServer
-  def init([%URI{} = uri, fun, %RetryConfig{} = retry_args]) do
-    timer = Process.send_after(self(), :max_timeout, retry_args.max_timeout)
+  def init(%{uri: %URI{} = uri, download_id: download_id, handle: fun, retry_config: %RetryConfig{}]) do
+    persist_to = Keyword.get(opts, :persist_to, Application.get_env(:nerves_hub_link, :persist_to, @default_persist_to))
+    streaming? = Keyword.get(opts, :streaming?, Application.get_env(:nerves_hub_link, :streaming?, true))
+    timer = Process.send_after(self(), :max_timeout, retry_config.max_timeout)
 
     state =
-      reset(%Downloader{
+      %Downloader{
+        uri: uri,
+        download_id: download_id,
+        persist_to: persist_to,
+        streaming?: streaming?,
         handler_fun: fun,
-        retry_args: retry_args,
-        max_timeout: timer,
-        uri: uri
-      })
+        retry_args: retry_config,
+        max_timeout: timer
+      }
+      |> reset()
+      |> setup_file()
 
     send(self(), :resume)
     {:ok, state}
@@ -283,7 +306,9 @@ defmodule NervesHubLink.Downloader do
     location = fetch_location(headers)
     Logger.info("[NervesHubLink] Redirecting to #{location}")
 
-    state = reset(state)
+        state = state
+                |> reset()
+                |> setup_file()
 
     case resume_download(location, state) do
       {:ok, %Downloader{} = state} ->
@@ -322,7 +347,9 @@ defmodule NervesHubLink.Downloader do
     schedule_worst_case_timer(%Downloader{
       state
       | response_headers: headers,
-        content_length: content_length
+        # important to include file_bytes if we are restarting a
+        # a persisted download
+        content_length: file_bytes + content_length
     })
   end
 
@@ -348,7 +375,7 @@ defmodule NervesHubLink.Downloader do
       state
       | retry_number: 0,
         downloaded_length: 0,
-        content_length: 0
+        content_length: 0,
     }
   end
 
@@ -407,11 +434,8 @@ defmodule NervesHubLink.Downloader do
   @spec add_range_header(Mint.Types.headers(), t()) :: Mint.Types.headers()
   defp add_range_header(headers, state)
 
-  defp add_range_header(headers, %Downloader{content_length: 0}), do: headers
-
-  defp add_range_header(headers, %Downloader{downloaded_length: r, content_length: total})
-       when total > 0,
-       do: [{"Range", "bytes=#{r}-#{total}"} | headers]
+  defp add_range_header(headers, %Downloader{downloaded_length: r}),
+       do: [{"Range", "bytes=#{r}-"} | headers]
 
   @spec add_retry_number_header(Mint.Types.headers(), t()) :: Mint.Types.headers()
   defp add_retry_number_header(headers, %Downloader{retry_number: retry_number}),
@@ -419,4 +443,45 @@ defmodule NervesHubLink.Downloader do
 
   defp add_user_agent_header(headers, _),
     do: [{"User-Agent", "NHL/#{Application.spec(:nerves_hub_link_common)[:vsn]}"} | headers]
+
+    defp setup_file(%Downloader{persist_to: nil} = d) do
+      d
+    end
+
+    defp setup_file(%Downloader{persist_to: dir, download_id: download_id} = d) do
+      path = Path.join(dir, download_id)
+      bytes =
+        case File.stat(path) do
+          {:error, _} -> 0
+          {:ok, %{size: bytes} -> bytes
+        end
+
+      # Attempt closing if already open
+      if d.file do
+        try do
+          File.close(d.file)
+        rescue
+          _ ->
+            :ok
+        end
+      end
+
+      case File.open(path, [:append, :binary]) do
+        {:ok, f} ->
+          %{d | file: f, file_bytes: bytes, downloaded_length: bytes}
+        {:error, reason} ->
+          Logger.error("Could not open file '#{path}' for writing. Proceeding with streaming. Reason: #{inspect(reason)}")
+          # Disables persistance
+          %{d | file: nil, streamed?: true, file_bytes: 0, downloaded_length: 0}
+      end
+    end
+
+    defp write_data(%Downloader{file: nil} = d, data) do
+      d
+    end
+
+    defp write_data(%Downloader{file: file} = d, data) do
+      IO.binwrite(file, data)
+      d
+    end
 end
