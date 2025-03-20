@@ -75,6 +75,27 @@ defmodule NervesHubLink.Client.Default do
   end
 
   @impl NervesHubLink.Client
+  def handle_message({:progress, percent}) do
+    Logger.debug("[NervesHubLink] FWUP PROG: #{percent}%")
+  end
+
+  def handle_message({:error, _, message}) do
+    Logger.error("[NervesHubLink] FWUP ERROR: #{message}")
+  end
+
+  def handle_message({:warning, _, message}) do
+    Logger.warning("[NervesHubLink] FWUP WARN: #{message}")
+  end
+
+  def handle_message({:ok, status, message}) do
+    Logger.info("[NervesHubLink] FWUP SUCCESS: #{status} #{message}")
+  end
+
+  def handle_message(fwup_message) do
+    Logger.warning("[NervesHubLink] Unknown FWUP message: #{inspect(fwup_message)}")
+  end
+
+  @impl NervesHubLink.Client
   def handle_error(error) do
     Logger.warning("[NervesHubLink] error: #{inspect(error)}")
   end

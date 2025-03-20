@@ -11,7 +11,7 @@ defmodule NervesHubLink.FwupConfig do
   alias NervesHubLink.Configurator.Config
 
   @doc "Raises an ArgumentError on invalid arguments"
-  @spec validate!(t()) :: t()
+  @spec validate!(Config.t()) :: Config.t()
   def validate!(%Config{} = args) do
     args
     |> validate_fwup_devpath!()

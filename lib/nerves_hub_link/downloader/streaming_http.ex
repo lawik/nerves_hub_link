@@ -102,10 +102,10 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
   Begins downloading a file at `url` handled by `fun`.
   """
   @spec start_download(module(), GenServer.server(), URI.t(), Config.t()) :: GenServer.on_start()
-  def start_download(manager_module, manager, url, config) do
+  def start_download(manager_module, manager, %URI{} = uri, config) do
     # TODO: derive retry config from Config
 
-    GenServer.start_link(__MODULE__, %{manager_module: manager_module, manager: manager, url: url, config: config})
+    GenServer.start_link(__MODULE__, %{manager_module: manager_module, manager: manager, uri: uri, config: config})
   end
 
   @impl GenServer
@@ -147,7 +147,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
   # milliseconds have occurred. It indicates that many milliseconds have elapsed since
   # the last "chunk" from the HTTP server
   def handle_info(:timeout, %StreamingHTTP{} = state) do
-    state.manager_module.report_download_status({:error, :idle_timeout})
+    state.manager_module.report_download_status(state.manager, {:error, :idle_timeout})
     state = reschedule_resume(state)
     {:noreply, state}
   end
@@ -169,7 +169,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
         {:noreply, state, state.retry_args.idle_timeout}
 
       error ->
-        state.manager_module.report_download_status(error)
+        state.manager_module.report_download_status(state.manager, error)
         state = reschedule_resume(state)
         {:noreply, state}
     end
@@ -181,7 +181,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
         handle_responses(responses, %{state | conn: conn})
 
       {:error, conn, error, responses} ->
-        state.manager_module.report_download_status({:error, error})
+        state.manager_module.report_download_status(state.manager, {:error, error})
         handle_responses(responses, reschedule_resume(%{state | conn: conn}))
 
       :unknown ->
@@ -339,7 +339,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
         {:data, request_ref, data},
         %StreamingHTTP{request_ref: request_ref, downloaded_length: downloaded} = state
       ) do
-    state.manager_module.report_download_status({:data, data})
+    state.manager_module.report_download_status(state.manager, {:data, data})
     %StreamingHTTP{state | downloaded_length: downloaded + byte_size(data)}
   end
 

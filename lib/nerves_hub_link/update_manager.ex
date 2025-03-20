@@ -16,6 +16,7 @@ defmodule NervesHubLink.UpdateManager do
   """
   use GenServer
 
+  alias NervesHubLink.Client
   alias NervesHubLink.Configurator.Config
   alias NervesHubLink.Downloader
   alias NervesHubLink.Installer
@@ -108,7 +109,7 @@ defmodule NervesHubLink.UpdateManager do
   def init(%Config{} = config) do
     :alarm_handler.clear_alarm(NervesHubLink.UpdateInProgress)
     # Fail immediately on bad config
-    Installer.installer().validate!(config)
+    Installer.installer().validate_config!(config)
     {:ok, %State{config: config}}
   end
 
@@ -143,7 +144,7 @@ defmodule NervesHubLink.UpdateManager do
 
   def handle_call({:download, {:error, reason}}, _from, state) do
     Logger.error("[NervesHubLink] Nonfatal HTTP download error: #{inspect(reason)}")
-    NervesHubLink.send_update_status("download error #{inspect(message)}")
+    NervesHubLink.send_update_status("download error #{inspect(reason)}")
     {:reply, :ok, state}
   end
 
@@ -162,7 +163,7 @@ defmodule NervesHubLink.UpdateManager do
 
   def handle_call({:install, :complete}, _from, state) do
     :alarm_handler.clear_alarm(NervesHubLink.UpdateInProgress)
-    NervesHubLink.Client.initiate_reboot()
+    state.config.client.initiate_reboot()
     state = %State{state | installer: nil, update_info: nil, status: :idle}
     {:reply, :ok, state}
   end
@@ -218,7 +219,7 @@ defmodule NervesHubLink.UpdateManager do
     # possibly offload update decision to an external module.
     # This will allow application developers
     # to control exactly when an update is applied.
-    case Client.update_available(update_info) do
+    case state.config.client.update_available(update_info) do
       :apply ->
         start_update(update_info, firmware_signing_certs, state)
 

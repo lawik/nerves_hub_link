@@ -69,6 +69,13 @@ defmodule NervesHubLink.Client do
           | {:error, non_neg_integer(), String.t()}
           | {:progress, 0..100}
 
+  @typedoc "Firmware update progress, completion or error report"
+  @type update_message ::
+          {:ok, non_neg_integer(), String.t()}
+          | {:warning, non_neg_integer(), String.t()}
+          | {:error, non_neg_integer(), String.t()}
+          | {:progress, 0..100}
+
   @doc """
   Called to find out what to do when a firmware update is available.
 
@@ -145,7 +152,7 @@ defmodule NervesHubLink.Client do
   """
   @callback reboot() :: no_return()
 
-  @optional_callbacks [reconnect_backoff: 0, reboot: 0, handle_fwup_message: 1]
+  @optional_callbacks [reconnect_backoff: 0, reboot: 0, handle_fwup_message: 1, handle_message: 1]
 
   @doc """
   This function is called internally by NervesHubLink to notify clients.
@@ -198,7 +205,7 @@ defmodule NervesHubLink.Client do
   @spec handle_message(fwup_message()) :: :ok
   def handle_message(data) do
     # If the new handle_message is defined, prefer it
-    if(function_exported?(mod(), :handle_message, 1) do
+    if function_exported?(mod(), :handle_message, 1) do
       _ = apply_wrap(mod(), :handle_message, [data])
     else
       _ = apply_wrap(mod(), :handle_fwup_message, [data])

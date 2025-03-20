@@ -127,7 +127,7 @@ defmodule NervesHubLink.ArchiveManager do
     # validate the file
 
     if valid_archive?(state.file_path, state.verification_keys) do
-      _ = Client.archive_ready(state.archive_info, state.file_path)
+      _ = state.config.client.archive_ready(state.archive_info, state.file_path)
     else
       Logger.error(
         "[NervesHubLink] Archive could not be validated, your public signing keys maybe be incorrectly configured"
@@ -191,7 +191,7 @@ defmodule NervesHubLink.ArchiveManager do
     temp_file_path = Path.join(state.data_path, "archives/#{file_name}.download")
     directory = Path.dirname(file_path)
 
-    case Client.archive_available(info) do
+    case state.config.client.archive_available(info) do
       :download ->
         {:ok, download} =
           Downloader.archive_downloader().start_download(__MODULE__, self(), info.url, state.config)

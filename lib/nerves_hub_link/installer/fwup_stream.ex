@@ -3,6 +3,7 @@ defmodule NervesHubLink.Installer.FwupStream do
   use GenServer
 
   alias NervesHubLink.Client
+  alias NervesHubLink.Configurator.Config
   alias NervesHubLink.FwupConfig
   alias NervesHubLink.UpdateManager
 
@@ -48,7 +49,7 @@ defmodule NervesHubLink.Installer.FwupStream do
   # messages from FWUP
   @impl GenServer
   def handle_info({:fwup, message}, state) do
-    _ = Client.handle_fwup_message(message)
+    _ = state.config.client.handle_message(message)
 
     case message do
       {:ok, 0, _message} ->

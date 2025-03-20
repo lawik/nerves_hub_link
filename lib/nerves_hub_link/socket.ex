@@ -343,7 +343,7 @@ defmodule NervesHubLink.Socket do
   end
 
   def handle_message(@device_topic, "identify", _params, socket) do
-    Client.identify()
+    socket.config.client.identify()
     {:ok, socket}
   end
 
@@ -538,7 +538,7 @@ defmodule NervesHubLink.Socket do
   @impl Slipstream
   def handle_topic_close(topic, reason, socket) when reason != :left do
     if topic == @device_topic do
-      _ = Client.handle_error(reason)
+      _ = socket.config.client.handle_error(reason)
     end
 
     rejoin(socket, topic)
@@ -546,9 +546,9 @@ defmodule NervesHubLink.Socket do
 
   @impl Slipstream
   def handle_disconnect(reason, socket) do
-    _ = Client.handle_error(reason)
+    _ = socket.config.client.handle_error(reason)
     :alarm_handler.set_alarm({NervesHubLink.Disconnected, [reason: reason]})
-    channel_config = %{socket.channel_config | reconnect_after_msec: Client.reconnect_backoff()}
+    channel_config = %{socket.channel_config | reconnect_after_msec: socket.config.client.reconnect_backoff()}
 
     channel_config =
       case Configurator.fetch_configurator() do

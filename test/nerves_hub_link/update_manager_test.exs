@@ -6,14 +6,16 @@
 #
 defmodule NervesHubLink.UpdateManagerTest do
   use ExUnit.Case
-  alias NervesHubLink.{FwupConfig, UpdateManager}
+  alias NervesHubLink.ClientMock
+  alias NervesHubLink.UpdateManager
   alias NervesHubLink.Message.{FirmwareMetadata, UpdateInfo}
   alias NervesHubLink.Support.{FWUPStreamPlug, Utils}
 
   describe "fwup stream" do
-    setup do
+    setup context do
+      Mox.verify_on_exit!(context)
+      config = default_config()
       port = Utils.unique_port_number()
-      devpath = "/tmp/fwup_output"
 
       update_payload = %UpdateInfo{
         firmware_url: "http://localhost:#{port}/test.fw",
@@ -25,26 +27,24 @@ defmodule NervesHubLink.UpdateManagerTest do
           {Plug.Cowboy, scheme: :http, plug: FWUPStreamPlug, options: [port: port]}
         )
 
-      File.rm(devpath)
+      File.rm(config.fwup_devpath)
 
-      {:ok, [plug: plug, update_payload: update_payload, devpath: "/tmp/fwup_output"]}
+      {:ok, [plug: plug, update_payload: update_payload, config: config]}
     end
 
-    test "apply", %{update_payload: update_payload, devpath: devpath} do
-      fwup_config = %{default_config() | fwup_devpath: devpath}
-
-      {:ok, manager} = UpdateManager.start_link(fwup_config)
-      assert UpdateManager.apply_update(manager, update_payload, []) == {:updating, 0}
+    test "apply", %{update_payload: update_payload, config: config} do
+      {:ok, manager} = UpdateManager.start_link(config)
+      assert UpdateManager.apply_update(manager, update_payload, []) == :updating
 
       assert_receive {:fwup, {:progress, 0}}
       assert_receive {:fwup, {:progress, 100}}
       assert_receive {:fwup, {:ok, 0, ""}}
     end
 
-    test "reschedule", %{update_payload: update_payload, devpath: devpath} do
+    test "reschedule", %{update_payload: update_payload, config: config} do
       test_pid = self()
 
-      update_available_fun = fn _ ->
+      Mox.expect(ClientMock, :update_available, fn _ ->
         case Process.get(:reschedule) do
           nil ->
             send(test_pid, :rescheduled)
@@ -54,15 +54,9 @@ defmodule NervesHubLink.UpdateManagerTest do
           _ ->
             :apply
         end
-      end
+      end)
 
-      fwup_config = %{
-        default_config()
-        | fwup_devpath: devpath,
-          update_available: update_available_fun
-      }
-
-      {:ok, manager} = UpdateManager.start_link(fwup_config)
+      {:ok, manager} = UpdateManager.start_link(config)
       assert UpdateManager.apply_update(manager, update_payload, []) == :update_rescheduled
       assert_received :rescheduled
       refute_received {:fwup, _}
@@ -72,10 +66,8 @@ defmodule NervesHubLink.UpdateManagerTest do
       assert_receive {:fwup, {:ok, 0, ""}}
     end
 
-    test "apply with fwup environment", %{update_payload: update_payload, devpath: devpath} do
-      fwup_config = %{
-        default_config()
-        | fwup_devpath: devpath,
+    test "apply with fwup environment", %{update_payload: update_payload, config: config} do
+      config = %{config |
           fwup_task: "secret_upgrade",
           fwup_env: [
             {"SUPER_SECRET", "1234567890123456789012345678901234567890123456789012345678901234"}
@@ -84,8 +76,11 @@ defmodule NervesHubLink.UpdateManagerTest do
 
       # If setting SUPER_SECRET in the environment doesn't happen, then test fails
       # due to fwup getting a bad aes key.
-      {:ok, manager} = UpdateManager.start_link(fwup_config)
-      assert UpdateManager.apply_update(manager, update_payload, []) == {:updating, 0}
+      Mox.expect(ClientMock, :update_available, fn _ -> :apply end)
+      Mox.expect(ClientMock, :reboot, fn -> :ok end)
+      {:ok, manager} = UpdateManager.start_link(config)
+      Mox.allow(ClientMock, self(), manager)
+      assert UpdateManager.apply_update(manager, update_payload, []) == :updating
 
       assert_receive {:fwup, {:progress, 0}}
       assert_receive {:fwup, {:progress, 100}}
@@ -94,13 +89,6 @@ defmodule NervesHubLink.UpdateManagerTest do
   end
 
   defp default_config() do
-    test_pid = self()
-    fwup_fun = &send(test_pid, {:fwup, &1})
-    update_available_fun = fn _ -> :apply end
-
-    %FwupConfig{
-      handle_fwup_message: fwup_fun,
-      update_available: update_available_fun
-    }
+    %{NervesHubLink.Configurator.build() | fwup_devpath: "/tmp/fwup_output"}
   end
 end
