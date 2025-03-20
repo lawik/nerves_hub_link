@@ -97,11 +97,18 @@ defmodule NervesHubLink.Client do
   @callback archive_ready(archive_data(), Path.t()) :: :ok
 
   @doc """
-  Called on firmware update reports.
+  Called on firmware update reports. Prefer handle_message/1.
 
   The return value of this function is not checked.
   """
   @callback handle_fwup_message(fwup_message()) :: :ok
+
+  @doc """
+  Called on firmware update reports.
+
+  The return value of this function is not checked.
+  """
+  @callback handle_message(update_message()) :: :ok
 
   @doc """
   Called when downloading a firmware update fails.
@@ -138,7 +145,7 @@ defmodule NervesHubLink.Client do
   """
   @callback reboot() :: no_return()
 
-  @optional_callbacks [reconnect_backoff: 0, reboot: 0]
+  @optional_callbacks [reconnect_backoff: 0, reboot: 0, handle_fwup_message: 1]
 
   @doc """
   This function is called internally by NervesHubLink to notify clients.
@@ -176,26 +183,25 @@ defmodule NervesHubLink.Client do
     :ok
   end
 
+  @deprecated "handle_message/1 is used instead"
   @doc """
-  This function is called internally by NervesHubLink to notify clients of fwup progress.
+  Called internally by NervesHubLink.
   """
   @spec handle_fwup_message(fwup_message()) :: :ok
   def handle_fwup_message(data) do
-    _ = apply_wrap(mod(), :handle_fwup_message, [data])
+    handle_message(data)
+  end
 
-    # TODO: nasty side effects here. Consider moving somewhere else
-    case data do
-      {:progress, percent} ->
-        NervesHubLink.send_update_progress(percent)
-
-      {:error, _, message} ->
-        NervesHubLink.send_update_status("fwup error #{message}")
-
-      {:ok, 0, _message} ->
-        initiate_reboot()
-
-      _ ->
-        :ok
+  @doc """
+  Called internally by NervesHubLink to informs clients about update activity.
+  """
+  @spec handle_message(fwup_message()) :: :ok
+  def handle_message(data) do
+    # If the new handle_message is defined, prefer it
+    if(function_exported?(mod(), :handle_message, 1) do
+      _ = apply_wrap(mod(), :handle_message, [data])
+    else
+      _ = apply_wrap(mod(), :handle_fwup_message, [data])
     end
   end
 

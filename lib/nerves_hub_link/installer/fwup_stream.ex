@@ -15,26 +15,12 @@ defmodule NervesHubLink.Installer.FwupStream do
 
   @impl NervesHubLink.Installer
   def validate_config!(config) do
-    fwup_config = %FwupConfig{
-      fwup_devpath: config.fwup_devpath,
-      fwup_task: config.fwup_task,
-      fwup_env: config.fwup_env,
-      handle_fwup_message: &Client.handle_fwup_message/1,
-      update_available: &Client.update_available/1
-    }
-    FwupConfig.validate!(fwup_config)
+    FwupConfig.validate!(config)
   end
 
   @impl GenServer
   def init(%{manager: manager, config: config, certs: firmware_signing_certs}) do
-    fwup_config = %FwupConfig{
-      fwup_devpath: config.fwup_devpath,
-      fwup_task: config.fwup_task,
-      fwup_env: config.fwup_env,
-      handle_fwup_message: &Client.handle_fwup_message/1,
-      update_available: &Client.update_available/1
-    }
-    {:ok, fwup} = Fwup.stream(self(), fwup_args(config, firmware_signing_certs), fwup_env: fwup_config.fwup_env)
+    {:ok, fwup} = Fwup.stream(self(), fwup_args(config, firmware_signing_certs), fwup_env: config.fwup_env)
     {:ok, %{fwup: fwup, config: config, manager: manager}}
   end
 
@@ -62,7 +48,7 @@ defmodule NervesHubLink.Installer.FwupStream do
   # messages from FWUP
   @impl GenServer
   def handle_info({:fwup, message}, state) do
-    _ = state.config.fwup_config.handle_fwup_message.(message)
+    _ = Client.handle_fwup_message(message)
 
     case message do
       {:ok, 0, _message} ->
@@ -85,8 +71,8 @@ defmodule NervesHubLink.Installer.FwupStream do
     end
   end
 
-  @spec fwup_args(FwupConfig.t(), list(String.t())) :: [String.t()]
-  defp fwup_args(%FwupConfig{} = config, firmware_signing_certs) do
+  @spec fwup_args(Config.t(), list(String.t())) :: [String.t()]
+  defp fwup_args(%Config{} = config, firmware_signing_certs) do
     args = ["--apply", "--no-unmount", "-d", config.fwup_devpath, "--task", config.fwup_task]
 
     Enum.reduce(firmware_signing_certs, args, fn public_key, args ->

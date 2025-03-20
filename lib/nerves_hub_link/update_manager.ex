@@ -143,11 +143,17 @@ defmodule NervesHubLink.UpdateManager do
 
   def handle_call({:download, {:error, reason}}, _from, state) do
     Logger.error("[NervesHubLink] Nonfatal HTTP download error: #{inspect(reason)}")
+    NervesHubLink.send_update_status("download error #{inspect(message)}")
     {:reply, :ok, state}
   end
 
   # Data from the downloader is sent to fwup
   def handle_call({:download, {:data, data}}, _from, state) do
+    # Backwards-compatible progress report
+    ((state.progress.download + state.progress.install) / 2)
+    |> round()
+    |> NervesHubLink.send_update_progress()
+
     # TODO: Report download progress upwards to the socket
     # currently only reporting on fwup progress
     Installer.installer().send_chunk(state.installer, data)
@@ -156,17 +162,24 @@ defmodule NervesHubLink.UpdateManager do
 
   def handle_call({:install, :complete}, _from, state) do
     :alarm_handler.clear_alarm(NervesHubLink.UpdateInProgress)
+    NervesHubLink.Client.initiate_reboot()
     state = %State{state | installer: nil, update_info: nil, status: :idle}
     {:reply, :ok, state}
   end
 
   def handle_call({:install, {:progress, percent}}, _from, state) do
+    # Backwards-compatible progress report
+    ((state.progress.download + state.progress.install) / 2)
+    |> round()
+    |> NervesHubLink.send_update_progress()
+
     state = %State{state | status: :updating, progress: %{state.progress | install: percent}}
     {:reply, :ok, state}
   end
 
   def handle_call({:install, {:error, message}}, _from, state) do
     :alarm_handler.clear_alarm(NervesHubLink.UpdateInProgress)
+    NervesHubLink.send_update_status("install error #{message}")
     state = %State{state | status: {:error, :install, message}}
     {:reply, :ok, state}
   end
@@ -205,8 +218,7 @@ defmodule NervesHubLink.UpdateManager do
     # possibly offload update decision to an external module.
     # This will allow application developers
     # to control exactly when an update is applied.
-    # note: update_available is a behaviour function
-    case state.config.fwup_config.update_available.(update_info) do
+    case Client.update_available(update_info) do
       :apply ->
         start_update(update_info, firmware_signing_certs, state)
 
