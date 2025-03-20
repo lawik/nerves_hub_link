@@ -20,4 +20,8 @@ defmodule NervesHubLink.Downloader do
   def downloader() do
     Application.get_env(:nerves_hub_link, :downloader, @default_downloader)
   end
+
+  def archive_downloader() do
+    Application.get_env(:nerves_hub_link, :archive_downloader, @default_downloader)
+  end
 end

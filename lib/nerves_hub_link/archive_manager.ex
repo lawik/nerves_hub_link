@@ -34,7 +34,9 @@ defmodule NervesHubLink.ArchiveManager do
           file_path: Path.t(),
           status: status(),
           temp_file_path: Path.t(),
-          update_reschedule_timer: nil | :timer.tref()
+          update_reschedule_timer: nil | :timer.tref(),
+          config: Config.t(),
+          verification_keys: list()
         }
 
   defstruct archive_info: nil,
@@ -43,7 +45,9 @@ defmodule NervesHubLink.ArchiveManager do
             file_path: nil,
             status: :idle,
             temp_file_path: nil,
-            update_reschedule_timer: nil
+            update_reschedule_timer: nil,
+            config: nil,
+            verification_keys: []
 
   @doc """
   Must be called when an archive payload is dispatched from
@@ -88,10 +92,18 @@ defmodule NervesHubLink.ArchiveManager do
   @impl GenServer
   def init(args) do
     state = %__MODULE__{
-      data_path: args.data_path
+      config: args,
+      data_path: args.data_path,
+      verification_keys: []
     }
 
     {:ok, state}
+  end
+
+  @spec report_download_status(manager :: GenServer.server(), message :: term()) :: :ok
+  def report_download_status(manager, message) do
+    # High timeout to be resilient to delays in decompression
+    GenServer.call(manager, {:download, message}, 60_000)
   end
 
   @impl GenServer
@@ -101,7 +113,49 @@ defmodule NervesHubLink.ArchiveManager do
         %__MODULE__{} = state
       ) do
     state = maybe_update_archive(info, verification_keys, state)
-    {:reply, state.status, state}
+    {:reply, state.status, %{state | verification_keys: verification_keys}}
+  end
+
+  # messages from Downloader
+  def handle_call({:download, {:complete, _data}}, _from, state) do
+    Logger.info("[NervesHubLink] Archive Download complete")
+
+    # Clear a potential old file since we finished downloading
+    _ = File.rm_rf(state.file_path)
+    _ = File.rename(state.temp_file_path, state.file_path)
+
+    # validate the file
+
+    if valid_archive?(state.file_path, state.verification_keys) do
+      _ = Client.archive_ready(state.archive_info, state.file_path)
+    else
+      Logger.error(
+        "[NervesHubLink] Archive could not be validated, your public signing keys maybe be incorrectly configured"
+      )
+    end
+
+    {:reply, :ok, %__MODULE__{
+       state
+       | archive_info: nil,
+         file_path: nil,
+         temp_file_path: nil,
+         download: nil,
+         status: :idle
+     }}
+  end
+
+  def handle_call({:download, {:error, reason}}, _from, state) do
+    Logger.error("[NervesHubLink] Nonfatal HTTP download error: #{inspect(reason)}")
+    {:reply, :ok, state}
+  end
+
+  # Data from the downloader is sent to fwup
+  def handle_call({:download, {:data, data}}, _from, state) do
+    :ok =
+      File.open!(state.temp_file_path, [:append], fn fd ->
+        IO.binwrite(fd, data)
+      end)
+    {:reply, :ok, state}
   end
 
   def handle_call(:currently_downloading_uuid, _from, %__MODULE__{archive_info: nil} = state) do
@@ -125,50 +179,6 @@ defmodule NervesHubLink.ArchiveManager do
      })}
   end
 
-  # messages from Downloader
-  def handle_info({:download, :complete, verification_keys}, state) do
-    Logger.info("[NervesHubLink] Archive Download complete")
-
-    # Clear a potential old file since we finished downloading
-    _ = File.rm_rf(state.file_path)
-    _ = File.rename(state.temp_file_path, state.file_path)
-
-    # validate the file
-
-    if valid_archive?(state.file_path, verification_keys) do
-      _ = Client.archive_ready(state.archive_info, state.file_path)
-    else
-      Logger.error(
-        "[NervesHubLink] Archive could not be validated, your public signing keys maybe be incorrectly configured"
-      )
-    end
-
-    {:noreply,
-     %__MODULE__{
-       state
-       | archive_info: nil,
-         file_path: nil,
-         temp_file_path: nil,
-         download: nil,
-         status: :idle
-     }}
-  end
-
-  def handle_info({:download, {:error, reason}, _verification_keys}, state) do
-    Logger.error("[NervesHubLink] Nonfatal HTTP download error: #{inspect(reason)}")
-    {:noreply, state}
-  end
-
-  # Data from the downloader
-  def handle_info({:download, {:data, data}, _verification_keys}, state) do
-    :ok =
-      File.open!(state.temp_file_path, [:append], fn fd ->
-        IO.binwrite(fd, data)
-      end)
-
-    {:noreply, state}
-  end
-
   defp maybe_update_archive(info, verification_keys, state) do
     # Cancel an existing timer if it exists.
     # This prevents rescheduled updates`
@@ -181,12 +191,10 @@ defmodule NervesHubLink.ArchiveManager do
     temp_file_path = Path.join(state.data_path, "archives/#{file_name}.download")
     directory = Path.dirname(file_path)
 
-    pid = self()
-
     case Client.archive_available(info) do
       :download ->
         {:ok, download} =
-          Downloader.start_download(info.url, &send(pid, {:download, &1, verification_keys}))
+          Downloader.archive_downloader().start_download(__MODULE__, self(), info.url, state.config)
 
         _ = File.mkdir_p(directory)
         _ = File.rm_rf(temp_file_path)

@@ -16,10 +16,4 @@ defmodule NervesHubLink.Installer do
   def installer() do
     Application.get_env(:nerves_hub_link, :installer, @default_installer)
   end
-
-  @default_installer NervesHubLink.Installer.FwupStream
-  def installer() do
-    Application.get_env(:nerves_hub_link, :installer, @default_installer)
-  end
-
 end

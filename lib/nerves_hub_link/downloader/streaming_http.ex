@@ -18,7 +18,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
   This process's **only** focus is obtaining data reliably. It doesn't have any
   side effects on the system.
 
-    You can configure various options related to how the `Downloader` handles timeouts,
+    You can configure various options related to how the `StreamingHTTP` handles timeouts,
   disconnections, and other aspects of the retry logic by adding the following configuration
   to your application's config file:
 
@@ -27,17 +27,16 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
         idle_timeout: 75_000,
         max_timeout: 10_800_000
 
-  For more information about the configuration options, see the [RetryConfig](`NervesHubLink.Downloader.RetryConfig`) module.
+  For more information about the configuration options, see the [RetryConfig](`NervesHubLink.StreamingHTTP.RetryConfig`) module.
   """
 
   use GenServer
 
-  alias NervesHubLink.Downloader
+  alias NervesHubLink.Downloader.StreamingHTTP
   alias NervesHubLink.Downloader.RetryConfig
   alias NervesHubLink.Downloader.TimeoutCalculation
 
   alias NervesHubLink.Configurator.Config
-  alias NervesHubLink.UpdateManager
 
   require Logger
 
@@ -49,20 +48,21 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
             content_length: 0,
             downloaded_length: 0,
             retry_number: 0,
+            manager_module: nil,
             manager: nil,
+            config: nil,
             retry_args: nil,
             max_timeout: nil,
             retry_timeout: nil,
             worst_case_timeout: nil,
             worst_case_timeout_remaining_ms: nil
 
-  @type handler_event :: {:data, binary()} | {:error, any()} | :complete
   @type retry_args :: RetryConfig.t()
 
   # alias for readability
   @typep timer() :: reference()
 
-  @type t :: %Downloader{
+  @type t :: %StreamingHTTP{
           uri: nil | URI.t(),
           conn: nil | Mint.HTTP.t(),
           request_ref: nil | reference(),
@@ -71,7 +71,9 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
           content_length: non_neg_integer(),
           downloaded_length: non_neg_integer(),
           retry_number: non_neg_integer(),
+          manager_module: module(),
           manager: GenServer.server(),
+          config: Config.t(),
           retry_args: retry_args(),
           max_timeout: timer(),
           retry_timeout: nil | timer(),
@@ -79,7 +81,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
           worst_case_timeout_remaining_ms: nil | non_neg_integer()
         }
 
-  @type initialized_download :: %Downloader{
+  @type initialized_download :: %StreamingHTTP{
           uri: URI.t(),
           conn: Mint.HTTP.t(),
           request_ref: reference(),
@@ -88,7 +90,9 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
           content_length: non_neg_integer(),
           downloaded_length: non_neg_integer(),
           retry_number: non_neg_integer(),
-          manager: GenServer.server()
+          manager_module: module(),
+          manager: GenServer.server(),
+          config: Config.t()
         }
 
   # todo, this should be `t`, but with retry_timeout
@@ -97,15 +101,15 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
   @doc """
   Begins downloading a file at `url` handled by `fun`.
   """
-  @spec start_download(GenServer.server(), URI.t(), Config.t()) :: GenServer.on_start()
-  def start_download(manager, url, config) when is_function(fun, 1) do
+  @spec start_download(module(), GenServer.server(), URI.t(), Config.t()) :: GenServer.on_start()
+  def start_download(manager_module, manager, url, config) do
     # TODO: derive retry config from Config
 
-    GenServer.start_link(__MODULE__, [manager, url, config])
+    GenServer.start_link(__MODULE__, %{manager_module: manager_module, manager: manager, url: url, config: config})
   end
 
   @impl GenServer
-  def init([manager, %URI{} = uri, config]) do
+  def init(%{manager_module: manager_module, manager: manager, uri: uri, config: config}) do
     retry_args =
       Application.get_env(:nerves_hub_link, :retry_config, [])
       |> RetryConfig.validate()
@@ -113,8 +117,10 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
     timer = Process.send_after(self(), :max_timeout, retry_args.max_timeout)
 
     state =
-      reset(%Downloader{
+      reset(%StreamingHTTP{
+        manager_module: manager_module,
         manager: manager,
+        config: config,
         retry_args: retry_args,
         max_timeout: timer,
         uri: uri
@@ -128,20 +134,20 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
   # this message is scheduled during init/1
   # it is a extreme condition where regardless of download attempts,
   # idle timeouts etc, this entire process has lived for TOO long.
-  def handle_info(:max_timeout, %Downloader{} = state) do
+  def handle_info(:max_timeout, %StreamingHTTP{} = state) do
     {:stop, :max_timeout_reached, state}
   end
 
   # this message is scheduled when we receive the `content_length` value
-  def handle_info(:worst_case_download_speed_timeout, %Downloader{} = state) do
+  def handle_info(:worst_case_download_speed_timeout, %StreamingHTTP{} = state) do
     {:stop, :worst_case_download_speed_reached, state}
   end
 
   # this message is delivered after `state.retry_args.idle_timeout`
   # milliseconds have occurred. It indicates that many milliseconds have elapsed since
   # the last "chunk" from the HTTP server
-  def handle_info(:timeout, %Downloader{} = state) do
-    _ = handler.({:error, :idle_timeout})
+  def handle_info(:timeout, %StreamingHTTP{} = state) do
+    state.manager_module.report_download_status({:error, :idle_timeout})
     state = reschedule_resume(state)
     {:noreply, state}
   end
@@ -149,7 +155,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
   # message is scheduled when a resumable event happens.
   def handle_info(
         :resume,
-        %Downloader{
+        %StreamingHTTP{
           retry_number: retry_number,
           retry_args: %RetryConfig{max_disconnects: retry_number}
         } = state
@@ -157,25 +163,25 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
     {:stop, :max_disconnects_reached, state}
   end
 
-  def handle_info(:resume, %Downloader{handler_fun: handler} = state) do
+  def handle_info(:resume, %StreamingHTTP{} = state) do
     case resume_download(state.uri, state) do
       {:ok, state} ->
         {:noreply, state, state.retry_args.idle_timeout}
 
       error ->
-        _ = handler.(error)
+        state.manager_module.report_download_status(error)
         state = reschedule_resume(state)
         {:noreply, state}
     end
   end
 
-  def handle_info(message, %Downloader{handler_fun: handler} = state) do
+  def handle_info(message, %StreamingHTTP{} = state) do
     case Mint.HTTP.stream(state.conn, message) do
       {:ok, conn, responses} ->
         handle_responses(responses, %{state | conn: conn})
 
       {:error, conn, error, responses} ->
-        _ = handler.({:error, error})
+        state.manager_module.report_download_status({:error, error})
         handle_responses(responses, reschedule_resume(%{state | conn: conn}))
 
       :unknown ->
@@ -185,7 +191,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
 
   # schedules a message to be delivered based on retry args
   @spec reschedule_resume(t()) :: resume_rescheduled()
-  defp reschedule_resume(%Downloader{retry_number: retry_number} = state) do
+  defp reschedule_resume(%StreamingHTTP{retry_number: retry_number} = state) do
     # cancel the worst_case_timeout if it was running
     worst_case_timeout_remaining_ms =
       if state.worst_case_timeout do
@@ -194,7 +200,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
 
     timer = Process.send_after(self(), :resume, state.retry_args.time_between_retries)
 
-    %Downloader{
+    %StreamingHTTP{
       state
       | retry_timeout: timer,
         retry_number: retry_number + 1,
@@ -204,26 +210,26 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
 
   @spec schedule_worst_case_timer(t()) :: t()
   # only calculate worst_case_timeout_remaining_ms is not set
-  defp schedule_worst_case_timer(%Downloader{worst_case_timeout_remaining_ms: nil} = downloader) do
+  defp schedule_worst_case_timer(%StreamingHTTP{worst_case_timeout_remaining_ms: nil} = downloader) do
     # decompose here because in the formatter doesn't like all this being in the head
-    %Downloader{retry_args: retry_config, content_length: content_length} = downloader
+    %StreamingHTTP{retry_args: retry_config, content_length: content_length} = downloader
     %RetryConfig{worst_case_download_speed: speed} = retry_config
     ms = TimeoutCalculation.calculate_worst_case_timeout(content_length, speed)
     timer = Process.send_after(self(), :worst_case_download_speed_timeout, ms)
-    %Downloader{downloader | worst_case_timeout: timer}
+    %StreamingHTTP{downloader | worst_case_timeout: timer}
   end
 
   # worst_case_timeout_remaining_ms gets set if the timer gets canceled by reschedule_resume/1
   # this is done so that the timer doesn't keep counting while not actively downloading data
-  defp schedule_worst_case_timer(%Downloader{worst_case_timeout_remaining_ms: ms} = downloader) do
+  defp schedule_worst_case_timer(%StreamingHTTP{worst_case_timeout_remaining_ms: ms} = downloader) do
     timer = Process.send_after(self(), :worst_case_download_speed_timeout, ms)
-    %Downloader{downloader | worst_case_timeout: timer}
+    %StreamingHTTP{downloader | worst_case_timeout: timer}
   end
 
-  defp handle_responses([response | rest], %Downloader{} = state) do
+  defp handle_responses([response | rest], %StreamingHTTP{} = state) do
     case handle_response(response, state) do
       # this `status != nil` thing seems really weird. Shouldn't be needed.
-      %Downloader{status: status} = state when status != nil and status >= 400 ->
+      %StreamingHTTP{status: status} = state when status != nil and status >= 400 ->
         {:stop, {:http_error, status}, state}
 
       state ->
@@ -233,54 +239,54 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
 
   defp handle_responses(
          [],
-         %Downloader{downloaded_length: downloaded, content_length: downloaded} = state
+         %StreamingHTTP{downloaded_length: downloaded, content_length: downloaded} = state
        )
        when downloaded != 0 do
-    UpdateManager.report_download_status(state.manager, {:complete, %{}})
+    state.manager_module.report_download_status(state.manager, {:complete, %{}})
     {:stop, :normal, state}
   end
 
-  defp handle_responses([], %Downloader{} = state) do
+  defp handle_responses([], %StreamingHTTP{} = state) do
     {:noreply, state, state.retry_args.idle_timeout}
   end
 
   @doc false
   @spec handle_response(
           {:status, reference(), non_neg_integer()} | {:headers, reference(), keyword()},
-          Downloader.t()
+          StreamingHTTP.t()
         ) ::
-          Downloader.t()
+          StreamingHTTP.t()
   def handle_response(
         {:status, request_ref, status},
-        %Downloader{request_ref: request_ref} = state
+        %StreamingHTTP{request_ref: request_ref} = state
       )
       when status >= 300 and status < 400 do
-    %Downloader{state | status: status}
+    %StreamingHTTP{state | status: status}
   end
 
   # the handle_responses/2 function checks this value again because this function only handles state
   def handle_response(
         {:status, request_ref, status},
-        %Downloader{request_ref: request_ref} = state
+        %StreamingHTTP{request_ref: request_ref} = state
       )
       when status >= 400 do
     # kind of a hack to make the error type uniform
-    UpdateManager.report_download_status(state.manager, {:error, "HTTP error: #{status}")
-    %Downloader{state | status: status}
+    state.manager_module.report_download_status(state.manager, {:error, "HTTP error: #{status}"})
+    %StreamingHTTP{state | status: status}
   end
 
   def handle_response(
         {:status, request_ref, status},
-        %Downloader{request_ref: request_ref} = state
+        %StreamingHTTP{request_ref: request_ref} = state
       )
       when status >= 200 and status < 300 do
-    %Downloader{state | status: status}
+    %StreamingHTTP{state | status: status}
   end
 
   # handles HTTP redirects.
   def handle_response(
         {:headers, request_ref, headers},
-        %Downloader{request_ref: request_ref, status: status,} = state
+        %StreamingHTTP{request_ref: request_ref, status: status,} = state
       )
       when status >= 300 and status < 400 do
     location = fetch_location(headers)
@@ -289,11 +295,11 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
     state = reset(state)
 
     case resume_download(location, state) do
-      {:ok, %Downloader{} = state} ->
+      {:ok, %StreamingHTTP{} = state} ->
         state
 
       error ->
-        UpdateManager.report_download_status(state.manager, error)
+        state.manager_module.report_download_status(state.manager, error)
         state
     end
   end
@@ -302,15 +308,15 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
   # range requests will change this value
   def handle_response(
         {:headers, request_ref, headers},
-        %Downloader{request_ref: request_ref, content_length: content_length} = state
+        %StreamingHTTP{request_ref: request_ref, content_length: content_length} = state
       )
       when content_length > 0 do
-    schedule_worst_case_timer(%Downloader{state | response_headers: headers})
+    schedule_worst_case_timer(%StreamingHTTP{state | response_headers: headers})
   end
 
   def handle_response(
         {:headers, request_ref, headers},
-        %Downloader{request_ref: request_ref, content_length: 0} = state
+        %StreamingHTTP{request_ref: request_ref, content_length: 0} = state
       ) do
     case fetch_accept_ranges(headers) do
       accept_ranges when accept_ranges in ["none", nil] ->
@@ -322,7 +328,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
 
     content_length = fetch_content_length(headers)
 
-    schedule_worst_case_timer(%Downloader{
+    schedule_worst_case_timer(%StreamingHTTP{
       state
       | response_headers: headers,
         content_length: content_length
@@ -331,23 +337,23 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
 
   def handle_response(
         {:data, request_ref, data},
-        %Downloader{request_ref: request_ref, downloaded_length: downloaded} = state
+        %StreamingHTTP{request_ref: request_ref, downloaded_length: downloaded} = state
       ) do
-    UpdateManager.report_download_status({:data, data})
-    %Downloader{state | downloaded_length: downloaded + byte_size(data)}
+    state.manager_module.report_download_status({:data, data})
+    %StreamingHTTP{state | downloaded_length: downloaded + byte_size(data)}
   end
 
-  def handle_response({:done, request_ref}, %Downloader{request_ref: request_ref} = state) do
+  def handle_response({:done, request_ref}, %StreamingHTTP{request_ref: request_ref} = state) do
     state
   end
 
   # ignore other messages when redirecting
-  def handle_response(_, %Downloader{status: nil} = state) do
+  def handle_response(_, %StreamingHTTP{status: nil} = state) do
     state
   end
 
-  defp reset(%Downloader{} = state) do
-    %Downloader{
+  defp reset(%StreamingHTTP{} = state) do
+    %StreamingHTTP{
       state
       | retry_number: 0,
         downloaded_length: 0,
@@ -361,7 +367,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
           | {:error, Mint.HTTP.t(), Mint.Types.error()}
   defp resume_download(
          %URI{scheme: scheme, host: host, port: port, path: path, query: query} = uri,
-         %Downloader{} = state
+         %StreamingHTTP{} = state
        )
        when scheme in ["https", "http"] do
     request_headers =
@@ -379,7 +385,7 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
     with {:ok, conn} <- Mint.HTTP.connect(String.to_existing_atom(scheme), host, port),
          {:ok, conn, request_ref} <- Mint.HTTP.request(conn, "GET", path, request_headers, nil) do
       {:ok,
-       %Downloader{
+       %StreamingHTTP{
          state
          | uri: uri,
            conn: conn,
@@ -410,14 +416,14 @@ defmodule NervesHubLink.Downloader.StreamingHTTP do
   @spec add_range_header(Mint.Types.headers(), t()) :: Mint.Types.headers()
   defp add_range_header(headers, state)
 
-  defp add_range_header(headers, %Downloader{content_length: 0}), do: headers
+  defp add_range_header(headers, %StreamingHTTP{content_length: 0}), do: headers
 
-  defp add_range_header(headers, %Downloader{downloaded_length: r, content_length: total})
+  defp add_range_header(headers, %StreamingHTTP{downloaded_length: r, content_length: total})
        when total > 0,
        do: [{"Range", "bytes=#{r}-#{total}"} | headers]
 
   @spec add_retry_number_header(Mint.Types.headers(), t()) :: Mint.Types.headers()
-  defp add_retry_number_header(headers, %Downloader{retry_number: retry_number}),
+  defp add_retry_number_header(headers, %StreamingHTTP{retry_number: retry_number}),
     do: [{"X-Retry-Number", "#{retry_number}"} | headers]
 
   defp add_user_agent_header(headers, _),

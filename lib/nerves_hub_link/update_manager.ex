@@ -18,7 +18,6 @@ defmodule NervesHubLink.UpdateManager do
 
   alias NervesHubLink.Configurator.Config
   alias NervesHubLink.Downloader
-  alias NervesHubLink.FwupConfig
   alias NervesHubLink.Installer
   alias NervesHubLink.Message.UpdateInfo
   alias NervesHubLink.UpdateManager
@@ -48,7 +47,7 @@ defmodule NervesHubLink.UpdateManager do
               update_reschedule_timer: nil,
               installer: nil,
               downloader: nil,
-              fwup_config: nil,
+              config: nil,
               update_info: nil,
               progress: nil
   end
@@ -209,7 +208,7 @@ defmodule NervesHubLink.UpdateManager do
     # note: update_available is a behaviour function
     case state.config.fwup_config.update_available.(update_info) do
       :apply ->
-        start_fwup_stream(update_info, firmware_signing_certs, state)
+        start_update(update_info, firmware_signing_certs, state)
 
       :ignore ->
         state
@@ -235,7 +234,7 @@ defmodule NervesHubLink.UpdateManager do
 
   @spec start_update(UpdateInfo.t(), [binary()], State.t()) :: State.t()
   defp start_update(%UpdateInfo{} = update_info, firmware_signing_certs, state) do
-    {:ok, downloader} = Downloader.downloader().start_download(self(), URI.parse(update_info.firmware_url), fun)
+    {:ok, downloader} = Downloader.downloader().start_download(__MODULE__, self(), URI.parse(update_info.firmware_url), state.config)
 
     {:ok, installer} = Installer.installer().start_install(self(), state.config, firmware_signing_certs)
     Logger.info("[NervesHubLink] Downloading firmware: #{update_info.firmware_url}")

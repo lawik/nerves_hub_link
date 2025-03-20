@@ -9,11 +9,9 @@ defmodule NervesHubLink.Application do
   use Application
 
   alias NervesHubLink.ArchiveManager
-  alias NervesHubLink.Client
   alias NervesHubLink.Configurator
   alias NervesHubLink.Extensions
   alias NervesHubLink.ExtensionsSupervisor
-  alias NervesHubLink.FwupConfig
   alias NervesHubLink.Socket
   alias NervesHubLink.UpdateManager
 
