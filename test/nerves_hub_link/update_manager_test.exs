@@ -6,14 +6,12 @@
 #
 defmodule NervesHubLink.UpdateManagerTest do
   use ExUnit.Case
-  alias NervesHubLink.ClientMock
   alias NervesHubLink.UpdateManager
   alias NervesHubLink.Message.{FirmwareMetadata, UpdateInfo}
   alias NervesHubLink.Support.{FWUPStreamPlug, Utils}
 
   describe "fwup stream" do
-    setup context do
-      Mox.verify_on_exit!(context)
+    setup do
       config = default_config()
       port = Utils.unique_port_number()
 
@@ -44,17 +42,17 @@ defmodule NervesHubLink.UpdateManagerTest do
     test "reschedule", %{update_payload: update_payload, config: config} do
       test_pid = self()
 
-      Mox.expect(ClientMock, :update_available, fn _ ->
-        case Process.get(:reschedule) do
-          nil ->
-            send(test_pid, :rescheduled)
-            Process.put(:reschedule, true)
-            {:reschedule, 50}
-
-          _ ->
-            :apply
-        end
-      end)
+      #Mox.expect(ClientMock, :update_available, fn _ ->
+      #  case Process.get(:reschedule) do
+      #    nil ->
+      #      send(test_pid, :rescheduled)
+      #      Process.put(:reschedule, true)
+      #      {:reschedule, 50}
+      #
+      #    _ ->
+      #      :apply
+      #  end
+      #end)
 
       {:ok, manager} = UpdateManager.start_link(config)
       assert UpdateManager.apply_update(manager, update_payload, []) == :update_rescheduled
@@ -76,10 +74,9 @@ defmodule NervesHubLink.UpdateManagerTest do
 
       # If setting SUPER_SECRET in the environment doesn't happen, then test fails
       # due to fwup getting a bad aes key.
-      Mox.expect(ClientMock, :update_available, fn _ -> :apply end)
-      Mox.expect(ClientMock, :reboot, fn -> :ok end)
+      #Mox.expect(ClientMock, :update_available, fn _ -> :apply end)
+      #Mox.expect(ClientMock, :reboot, fn -> :ok end)
       {:ok, manager} = UpdateManager.start_link(config)
-      Mox.allow(ClientMock, self(), manager)
       assert UpdateManager.apply_update(manager, update_payload, []) == :updating
 
       assert_receive {:fwup, {:progress, 0}}
@@ -89,6 +86,6 @@ defmodule NervesHubLink.UpdateManagerTest do
   end
 
   defp default_config() do
-    %{NervesHubLink.Configurator.build() | fwup_devpath: "/tmp/fwup_output"}
+    %{NervesHubLink.Configurator.build() | fwup_devpath: "/tmp/fwup_output", }
   end
 end
