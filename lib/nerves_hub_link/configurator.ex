@@ -37,6 +37,7 @@ defmodule NervesHubLink.Configurator do
 
     defstruct archive_public_keys: [],
               client: NervesHubLink.Client.Default,
+              client_config: %{},
               connect: true,
               connect_wait_for_network: true,
               data_path: "/data/nerves-hub",
@@ -64,6 +65,7 @@ defmodule NervesHubLink.Configurator do
     @type t() :: %__MODULE__{
             archive_public_keys: [binary()],
             client: module(),
+            client_config: map(),
             connect: boolean(),
             connect_wait_for_network: boolean(),
             data_path: Path.t(),

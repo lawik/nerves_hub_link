@@ -46,6 +46,7 @@ defmodule NervesHubLink.Client do
   ```
   """
 
+  alias NervesHubLink.Configuration.Config
   alias NervesHubLink.Utils.Backoff
 
   require Logger
@@ -75,6 +76,8 @@ defmodule NervesHubLink.Client do
           | {:warning, non_neg_integer(), String.t()}
           | {:error, non_neg_integer(), String.t()}
           | {:progress, 0..100}
+
+  @type config() :: nil | Config.t()
 
   @doc """
   Called to find out what to do when a firmware update is available.
@@ -115,7 +118,7 @@ defmodule NervesHubLink.Client do
 
   The return value of this function is not checked.
   """
-  @callback handle_message(update_message()) :: :ok
+  @callback handle_message(update_message(), map()) :: :ok
 
   @doc """
   Called when downloading a firmware update fails.
@@ -152,14 +155,14 @@ defmodule NervesHubLink.Client do
   """
   @callback reboot() :: no_return()
 
-  @optional_callbacks [reconnect_backoff: 0, reboot: 0, handle_fwup_message: 1, handle_message: 1]
+  @optional_callbacks [reconnect_backoff: 0, reboot: 0, handle_fwup_message: 1, handle_message: 2]
 
   @doc """
   This function is called internally by NervesHubLink to notify clients.
   """
-  @spec update_available(update_data()) :: update_response()
-  def update_available(data) do
-    case apply_wrap(mod(), :update_available, [data]) do
+  @spec update_available(update_data(), config()) :: update_response()
+  def update_available(data, config \\ nil) do
+    case apply_wrap(mod(config), :update_available, [data]) do
       :apply ->
         :apply
 
@@ -171,21 +174,21 @@ defmodule NervesHubLink.Client do
 
       wrong ->
         Logger.error(
-          "[NervesHubLink] Client: #{inspect(mod())}.update_available/1 bad return value: #{inspect(wrong)} Applying update."
+          "[NervesHubLink] Client: #{inspect(mod(config))}.update_available/1 bad return value: #{inspect(wrong)} Applying update."
         )
 
         :apply
     end
   end
 
-  @spec archive_available(archive_data()) :: archive_response()
-  def archive_available(data) do
-    apply_wrap(mod(), :archive_available, [data])
+  @spec archive_available(archive_data(), config()) :: archive_response()
+  def archive_available(data, config \\ nil) do
+    apply_wrap(mod(config), :archive_available, [data])
   end
 
-  @spec archive_ready(archive_data(), Path.t()) :: :ok
-  def archive_ready(data, file_path) do
-    _ = apply_wrap(mod(), :archive_ready, [data, file_path])
+  @spec archive_ready(archive_data(), Path.t(), config()) :: :ok
+  def archive_ready(data, file_path, config \\ nil) do
+    _ = apply_wrap(mod(config), :archive_ready, [data, file_path])
 
     :ok
   end
@@ -194,30 +197,30 @@ defmodule NervesHubLink.Client do
   @doc """
   Called internally by NervesHubLink.
   """
-  @spec handle_fwup_message(fwup_message()) :: :ok
-  def handle_fwup_message(data) do
-    handle_message(data)
+  @spec handle_fwup_message(fwup_message(), config()) :: :ok
+  def handle_fwup_message(data, config \\ nil) do
+    handle_message(data, config)
   end
 
   @doc """
   Called internally by NervesHubLink to informs clients about update activity.
   """
-  @spec handle_message(fwup_message()) :: :ok
-  def handle_message(data) do
+  @spec handle_message(fwup_message(), config()) :: :ok
+  def handle_message(data, config \\ nil) do
     # If the new handle_message is defined, prefer it
-    if function_exported?(mod(), :handle_message, 1) do
-      _ = apply_wrap(mod(), :handle_message, [data])
+    if function_exported?(mod(config), :handle_message, 1) do
+      _ = apply_wrap(mod(config), :handle_message, [data])
     else
-      _ = apply_wrap(mod(), :handle_fwup_message, [data])
+      _ = apply_wrap(mod(config), :handle_fwup_message, [data])
     end
   end
 
   @doc """
   This function is called internally by NervesHubLink to identify a device.
   """
-  @spec identify() :: :ok
-  def identify() do
-    apply_wrap(mod(), :identify, [])
+  @spec identify(config()) :: :ok
+  def identify(config \\ nil) do
+    apply_wrap(mod(config), :identify, [])
   end
 
   @doc """
@@ -227,10 +230,9 @@ defmodule NervesHubLink.Client do
   reboot process. It calls `c:reboot/0` if supplied or
   `Nerves.Runtime.reboot/0`.
   """
-  @spec initiate_reboot() :: :ok
-  def initiate_reboot() do
-    client = mod()
-
+  @spec initiate_reboot(nil | Config.t()) :: :ok
+  def initiate_reboot(config \\ nil) do
+    client = mod(config)
     {mod, fun, args} =
       if function_exported?(client, :reboot, 0),
         do: {client, :reboot, []},
@@ -243,19 +245,20 @@ defmodule NervesHubLink.Client do
   @doc """
   This function is called internally by NervesHubLink to notify clients of fwup errors.
   """
-  @spec handle_error(any()) :: :ok
-  def handle_error(data) do
-    _ = apply_wrap(mod(), :handle_error, [data])
+  @spec handle_error(any(), config()) :: :ok
+  def handle_error(data, config \\ nil) do
+    _ = apply_wrap(mod(config), :handle_error, [data])
   end
 
   @doc """
   This function is called internally by NervesHubLink to notify clients of disconnects.
   """
-  @spec reconnect_backoff() :: [integer()]
-  def reconnect_backoff() do
+  @spec reconnect_backoff(config()) :: [integer()]
+  def reconnect_backoff(config \\ nil) do
+    client = mod(config)
     backoff =
-      if function_exported?(mod(), :reconnect_backoff, 0) do
-        apply_wrap(mod(), :reconnect_backoff, [])
+      if function_exported?(client, :reconnect_backoff, 0) do
+        apply_wrap(client, :reconnect_backoff, [])
       else
         nil
       end
@@ -276,7 +279,11 @@ defmodule NervesHubLink.Client do
     err -> err
   end
 
-  defp mod() do
+  defp mod(nil) do
     Application.get_env(:nerves_hub_link, :client, NervesHubLink.Client.Default)
+  end
+
+  defp mod(config) do
+    config.client
   end
 end

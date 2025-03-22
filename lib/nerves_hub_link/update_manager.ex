@@ -163,7 +163,7 @@ defmodule NervesHubLink.UpdateManager do
 
   def handle_call({:install, :complete}, _from, state) do
     :alarm_handler.clear_alarm(NervesHubLink.UpdateInProgress)
-    state.config.client.initiate_reboot()
+    NervesHubLink.Client.initiate_reboot(state.config)
     state = %State{state | installer: nil, update_info: nil, status: :idle}
     {:reply, :ok, state}
   end

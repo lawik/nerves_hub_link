@@ -49,7 +49,7 @@ defmodule NervesHubLink.Installer.FwupStream do
   # messages from FWUP
   @impl GenServer
   def handle_info({:fwup, message}, state) do
-    _ = state.config.client.handle_message(message)
+    _ = state.config.client.handle_message(message, state.config.client_config)
 
     case message do
       {:ok, 0, _message} ->
