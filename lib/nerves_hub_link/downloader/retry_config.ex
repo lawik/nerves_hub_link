@@ -47,6 +47,13 @@ defmodule NervesHubLink.Downloader.RetryConfig do
       """,
       type: :non_neg_integer,
       default: 30_000
+    ],
+    persist: [
+      doc: """
+      Whether to persist the download to disk or not.
+      """,
+      type: :boolean,
+      default: false
     ]
   ]
 
@@ -70,7 +77,8 @@ defmodule NervesHubLink.Downloader.RetryConfig do
           idle_timeout: non_neg_integer(),
           max_timeout: non_neg_integer(),
           time_between_retries: non_neg_integer(),
-          worst_case_download_speed: non_neg_integer()
+          worst_case_download_speed: non_neg_integer(),
+          persist: boolean()
         }
 
   @doc """

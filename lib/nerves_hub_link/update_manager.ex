@@ -235,7 +235,7 @@ defmodule NervesHubLink.UpdateManager do
   defp start_fwup_stream(%UpdateInfo{} = update_info, fwup_public_keys, state) do
     pid = self()
     fun = &report_download(pid, &1)
-    {:ok, download} = Downloader.start_download(update_info.firmware_url, fun)
+    {:ok, download} = Downloader.start_download(update_info.firmware_meta.uuid, update_info.firmware_url, fun)
 
     {:ok, fwup} =
       Fwup.stream(pid, fwup_args(state.fwup_config, fwup_public_keys),

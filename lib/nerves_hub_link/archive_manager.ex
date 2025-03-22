@@ -186,7 +186,7 @@ defmodule NervesHubLink.ArchiveManager do
     case Client.archive_available(info) do
       :download ->
         {:ok, download} =
-          Downloader.start_download(info.url, &send(pid, {:download, &1, verification_keys}))
+          Downloader.start_download(info.uuid, info.url, &send(pid, {:download, &1, verification_keys}))
 
         _ = File.mkdir_p(directory)
         _ = File.rm_rf(temp_file_path)

@@ -40,10 +40,12 @@ defmodule NervesHubLink.Downloader do
   require Logger
 
   defstruct uri: nil,
+            uuid: nil,
             conn: nil,
             request_ref: nil,
             status: nil,
             response_headers: [],
+            persist: false,
             content_length: 0,
             downloaded_length: 0,
             retry_number: 0,
@@ -63,10 +65,12 @@ defmodule NervesHubLink.Downloader do
 
   @type t :: %Downloader{
           uri: nil | URI.t(),
+          uuid: nil | String.t(),
           conn: nil | Mint.HTTP.t(),
           request_ref: nil | reference(),
           status: nil | Mint.Types.status(),
           response_headers: Mint.Types.headers(),
+          persist: boolean(),
           content_length: non_neg_integer(),
           downloaded_length: non_neg_integer(),
           retry_number: non_neg_integer(),
@@ -80,10 +84,12 @@ defmodule NervesHubLink.Downloader do
 
   @type initialized_download :: %Downloader{
           uri: URI.t(),
+          uuid: String.t(),
           conn: Mint.HTTP.t(),
           request_ref: reference(),
           status: nil | Mint.Types.status(),
           response_headers: Mint.Types.headers(),
+          persist: boolean(),
           content_length: non_neg_integer(),
           downloaded_length: non_neg_integer(),
           retry_number: non_neg_integer(),
@@ -110,23 +116,23 @@ defmodule NervesHubLink.Downloader do
         iex> flush()
         :complete
   """
-  @spec start_download(String.t() | URI.t(), event_handler_fun()) :: GenServer.on_start()
-  def start_download(url, fun) when is_function(fun, 1) do
+  @spec start_download(String.t(), String.t() | URI.t(), event_handler_fun()) :: GenServer.on_start()
+  def start_download(uuid, url, fun) when is_function(fun, 1) do
     retry_config =
       Application.get_env(:nerves_hub_link, :retry_config, [])
       |> RetryConfig.validate()
 
-    GenServer.start_link(__MODULE__, [URI.parse(url), fun, retry_config])
+    GenServer.start_link(__MODULE__, [uuid, URI.parse(url), fun, retry_config])
   end
 
-  @spec start_download(String.t() | URI.t(), event_handler_fun(), RetryConfig.t()) ::
+  @spec start_download(String.t(), String.t() | URI.t(), event_handler_fun(), RetryConfig.t()) ::
           GenServer.on_start()
-  def start_download(url, fun, %RetryConfig{} = retry_args) when is_function(fun, 1) do
-    GenServer.start_link(__MODULE__, [URI.parse(url), fun, retry_args])
+  def start_download(uuid, url, fun, %RetryConfig{} = retry_args) when is_function(fun, 1) do
+    GenServer.start_link(__MODULE__, [uuid, URI.parse(url), fun, retry_args])
   end
 
   @impl GenServer
-  def init([%URI{} = uri, fun, %RetryConfig{} = retry_args]) do
+  def init([uuid, %URI{} = uri, fun, %RetryConfig{} = retry_args]) do
     timer = Process.send_after(self(), :max_timeout, retry_args.max_timeout)
 
     state =
@@ -134,7 +140,10 @@ defmodule NervesHubLink.Downloader do
         handler_fun: fun,
         retry_args: retry_args,
         max_timeout: timer,
-        uri: uri
+        uri: uri,
+        uuid: uuid,
+        # RetryConfig doesn't do default: false well
+        persist: retry_args.persist == true
       })
 
     send(self(), :resume)
@@ -175,6 +184,7 @@ defmodule NervesHubLink.Downloader do
   end
 
   def handle_info(:resume, %Downloader{handler_fun: handler} = state) do
+    state = check_progress(state)
     case resume_download(state.uri, state) do
       {:ok, state} ->
         {:noreply, state, state.retry_args.idle_timeout}
@@ -439,4 +449,32 @@ defmodule NervesHubLink.Downloader do
 
   defp add_user_agent_header(headers, _),
     do: [{"User-Agent", "NHL/#{Application.spec(:nerves_hub_link)[:vsn]}"} | headers]
+
+  defp check_progress(%Downloader{uuid: uuid, persist: true} = state) do
+      base_path = Application.get_env(:nerves_hub_link, :persist_dir, "/data/nerves_hub_link/firmware")
+      firmware_path = Path.join(base_path, "#{uuid}.fw")
+      case File.stat(firmware_path) do
+        # does not exist
+        {:error, :enoent} ->
+          with :ok <- File.mkdir_p(base_path),
+               :ok <- File.touch(firmware_path) do
+            Logger.info("Start fresh firmware download at #{firmware_path}")
+            %{state | downloaded_length: 0}
+          else
+            {:error, reason} ->
+              Logger.error("Failed to create firmware file on disk #{firmware_path} with #{inspect(reason)}. Falling back to streaming.")
+              %{state | persist: false}
+          end
+        {:ok, %{type: :regular, size: size}} ->
+          Logger.info("Resuming firmware download at #{size} bytes...")
+          %{state | downloaded_length: size}
+        {:error, reason} ->
+          Logger.error("Failed to stat firmware file on disk #{firmware_path} with #{inspect(reason)}. Falling back to streaming.")
+          %{state | persist: false}
+      end
+  end
+
+  defp check_progress(%Downloader{persist: false} = state) do
+    state
+  end
 end

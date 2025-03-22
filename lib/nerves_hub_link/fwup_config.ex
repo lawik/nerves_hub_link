@@ -17,7 +17,8 @@ defmodule NervesHubLink.FwupConfig do
             fwup_env: [],
             fwup_task: "",
             handle_fwup_message: nil,
-            update_available: nil
+            update_available: nil,
+            persisted?: false
 
   @typedoc """
   `handle_fwup_message` will be called with this data
