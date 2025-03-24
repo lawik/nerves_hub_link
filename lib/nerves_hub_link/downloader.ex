@@ -40,10 +40,9 @@ defmodule NervesHubLink.Downloader do
   require Logger
 
   defstruct uri: nil,
-            conn: nil,
-            request_ref: nil,
+            request: nil,
+            response: nil,
             status: nil,
-            response_headers: [],
             content_length: 0,
             downloaded_length: 0,
             retry_number: 0,
@@ -63,10 +62,9 @@ defmodule NervesHubLink.Downloader do
 
   @type t :: %Downloader{
           uri: nil | URI.t(),
-          conn: nil | Mint.HTTP.t(),
-          request_ref: nil | reference(),
-          status: nil | Mint.Types.status(),
-          response_headers: Mint.Types.headers(),
+          request: nil | Req.Request.t(),
+          response: nil | Req.Response.t(),
+          status: nil | non_neg_integer(),
           content_length: non_neg_integer(),
           downloaded_length: non_neg_integer(),
           retry_number: non_neg_integer(),
@@ -80,10 +78,9 @@ defmodule NervesHubLink.Downloader do
 
   @type initialized_download :: %Downloader{
           uri: URI.t(),
-          conn: Mint.HTTP.t(),
-          request_ref: reference(),
-          status: nil | Mint.Types.status(),
-          response_headers: Mint.Types.headers(),
+          request: nil | Req.Request.t(),
+          response: nil | Req.Response.t(),
+          status: nil | non_neg_integer(),
           content_length: non_neg_integer(),
           downloaded_length: non_neg_integer(),
           retry_number: non_neg_integer(),
@@ -186,18 +183,8 @@ defmodule NervesHubLink.Downloader do
     end
   end
 
-  def handle_info(message, %Downloader{handler_fun: handler} = state) do
-    case Mint.HTTP.stream(state.conn, message) do
-      {:ok, conn, responses} ->
-        handle_responses(responses, %{state | conn: conn})
-
-      {:error, conn, error, responses} ->
-        _ = handler.({:error, error})
-        handle_responses(responses, reschedule_resume(%{state | conn: conn}))
-
-      :unknown ->
-        {:stop, :unknown, state}
-    end
+  def handle_info(message, state) do
+    case Req.process_message(
   end
 
   # schedules a message to be delivered based on retry args
@@ -237,132 +224,6 @@ defmodule NervesHubLink.Downloader do
     %Downloader{downloader | worst_case_timeout: timer}
   end
 
-  defp handle_responses([response | rest], %Downloader{} = state) do
-    case handle_response(response, state) do
-      # this `status != nil` thing seems really weird. Shouldn't be needed.
-      %Downloader{status: status} = state when status != nil and status >= 400 ->
-        {:stop, {:http_error, status}, state}
-
-      state ->
-        handle_responses(rest, state)
-    end
-  end
-
-  defp handle_responses(
-         [],
-         %Downloader{downloaded_length: downloaded, content_length: downloaded} = state
-       )
-       when downloaded != 0 do
-    _ = state.handler_fun.(:complete)
-    {:stop, :normal, state}
-  end
-
-  defp handle_responses([], %Downloader{} = state) do
-    {:noreply, state, state.retry_args.idle_timeout}
-  end
-
-  @doc false
-  @spec handle_response(
-          {:status, reference(), non_neg_integer()} | {:headers, reference(), keyword()},
-          Downloader.t()
-        ) ::
-          Downloader.t()
-  def handle_response(
-        {:status, request_ref, status},
-        %Downloader{request_ref: request_ref} = state
-      )
-      when status >= 300 and status < 400 do
-    %Downloader{state | status: status}
-  end
-
-  # the handle_responses/2 function checks this value again because this function only handles state
-  def handle_response(
-        {:status, request_ref, status},
-        %Downloader{request_ref: request_ref} = state
-      )
-      when status >= 400 do
-    # kind of a hack to make the error type uniform
-    state.handler_fun.({:error, %Mint.HTTPError{reason: {:http_error, status}}})
-    %Downloader{state | status: status}
-  end
-
-  def handle_response(
-        {:status, request_ref, status},
-        %Downloader{request_ref: request_ref} = state
-      )
-      when status >= 200 and status < 300 do
-    %Downloader{state | status: status}
-  end
-
-  # handles HTTP redirects.
-  def handle_response(
-        {:headers, request_ref, headers},
-        %Downloader{request_ref: request_ref, status: status, handler_fun: handler} = state
-      )
-      when status >= 300 and status < 400 do
-    location = fetch_location(headers)
-    Logger.info("[NervesHubLink] Redirecting to #{location}")
-
-    state = reset(state)
-
-    case resume_download(location, state) do
-      {:ok, %Downloader{} = state} ->
-        state
-
-      error ->
-        handler.(error)
-        state
-    end
-  end
-
-  # if we already have the content-length header, don't fetch it again.
-  # range requests will change this value
-  def handle_response(
-        {:headers, request_ref, headers},
-        %Downloader{request_ref: request_ref, content_length: content_length} = state
-      )
-      when content_length > 0 do
-    schedule_worst_case_timer(%Downloader{state | response_headers: headers})
-  end
-
-  def handle_response(
-        {:headers, request_ref, headers},
-        %Downloader{request_ref: request_ref, content_length: 0} = state
-      ) do
-    case fetch_accept_ranges(headers) do
-      accept_ranges when accept_ranges in ["none", nil] ->
-        Logger.error("[NervesHubLink] HTTP Server does not support the Range header")
-
-      _ ->
-        :ok
-    end
-
-    content_length = fetch_content_length(headers)
-
-    schedule_worst_case_timer(%Downloader{
-      state
-      | response_headers: headers,
-        content_length: content_length
-    })
-  end
-
-  def handle_response(
-        {:data, request_ref, data},
-        %Downloader{request_ref: request_ref, downloaded_length: downloaded} = state
-      ) do
-    _ = state.handler_fun.({:data, data})
-    %Downloader{state | downloaded_length: downloaded + byte_size(data)}
-  end
-
-  def handle_response({:done, request_ref}, %Downloader{request_ref: request_ref} = state) do
-    state
-  end
-
-  # ignore other messages when redirecting
-  def handle_response(_, %Downloader{status: nil} = state) do
-    state
-  end
-
   defp reset(%Downloader{} = state) do
     %Downloader{
       state
@@ -372,39 +233,94 @@ defmodule NervesHubLink.Downloader do
     }
   end
 
-  @spec resume_download(URI.t(), t()) ::
-          {:ok, initialized_download()}
-          | {:error, Mint.Types.error()}
-          | {:error, Mint.HTTP.t(), Mint.Types.error()}
   defp resume_download(
          %URI{scheme: scheme, host: host, port: port, path: path, query: query} = uri,
          %Downloader{} = state
        )
        when scheme in ["https", "http"] do
-    request_headers =
-      [{"content-type", "application/octet-stream"}]
-      |> add_range_header(state)
-      |> add_retry_number_header(state)
-      |> add_user_agent_header(state)
-
-    # mint doesn't accept the query as the http body, so it must be encoded
-    # like this. There may be a better way to do this..
-    path = if query, do: "#{path}?#{query}", else: path
-
+    url = URI.to_string(uri)
     Logger.info("[NervesHubLink] Resuming download attempt number #{state.retry_number} #{uri}")
+    pid = self()
 
-    with {:ok, conn} <- Mint.HTTP.connect(String.to_existing_atom(scheme), host, port),
-         {:ok, conn, request_ref} <- Mint.HTTP.request(conn, "GET", path, request_headers, nil) do
-      {:ok,
-       %Downloader{
-         state
-         | uri: uri,
-           conn: conn,
-           request_ref: request_ref,
-           status: nil,
-           response_headers: []
-       }}
-    end
+    result =
+      Req.get(url,
+        into: & handle_chunk(pid, &1, &2),
+        range: "#{state.downloaded_length}-",
+        headers: [
+          content_type: "application/octet-stream",
+          x_retry_number: to_string(state.retry_number),
+          user_agent: "NHL/#{Application.spec(:nerves_hub_link)[:vsn]}"
+        ],
+        # Note: We don't use Req's built-in retries because they don't support
+        #       resuming our downloads where we left off.
+
+        #retry: :safe_transient,
+        # retry_delay kept at default which is respecting Retry-After header falling back
+        # to exponential back-off
+        # we could also use state.retry_args.time_between_retries
+        #retry_log_level: :warning,
+        #max_retries: state.retry_args.max_disconnects,
+        max_retries: 0,
+        receive_timeout: state.retry_args.idle_timeout
+      )
+
+      case result do
+        {:ok, %{status: 200}} ->
+          # This means Req has finished the entire download, streaming chunks along the way
+          _ = state.handler_fun.(:complete)
+          {:stop, :normal, state}
+
+        {:ok, %{status: status}} when status >= 200 and status < 300 ->
+          {:noreply, %Downloader{state | status: status}}
+
+        {:ok, %{status: status}} when status >= 300 and status < 400 ->
+          # Unexpected because Req handles redirects
+          Logger.warning("Unexpected redirect result in download.")
+          {:noreply, %Downloader{state | status: status}}
+
+        {:ok, %{status: 403}} ->
+          Logger.error("Download failed for #{url} with 403. Must re-auth.")
+          {:stop, {:http_error, status}, state}
+
+        {:ok, %{status: status}} when status > 400 ->
+          Logger.error("Download failed for #{url} with error status:\n#{status}")
+          {:stop, {:http_error, status}, state}
+
+        {:error, exception} ->
+          Logger.warning("Download failed for #{url} with error:\n#{inspect(exception)}")
+          if state.retry_number > state.retry_args.max_disconnects do
+            Logger.error("Exhausted #{state.retry_args.max_disconnects} retries. Reporting error and stopping downloader.")
+            _ = state.handler_fun.({:error, :request_error})
+            {:stop, :connection_error, state}
+          else
+            {:noreply, reschedule_resume(state)}
+          end
+      end
+  end
+
+  defp handle_chunk(pid, {:data, data}, {req, res}) do
+    # We use a GenServer.call to ensure backpressure against Req
+    GenServer.call(pid, {:chunk, data, req, res})
+  end
+
+  @impl GenServer
+  def handle_call({:chunk, data, req, res}, _from, state) do
+    # Currently the progress is all reported by fwup progress, if we want download
+    # to be factored in we need to pull the content-length header here.
+    _ = state.handler_fun.({:data, data})
+    content_length =
+      if downloaded_length == 0 do
+        case Req.Response.get_header(res) do
+          [length] ->
+            length
+            |> Integer.parse(length)
+            |> elem(0)
+          [] ->
+            0
+      else
+        state.content_length
+      end
+    {:reply, {:cont, {req, resp}}, %{state | downloaded_length: state.downloaded_length, content_length: content_length}
   end
 
   @spec fetch_content_length(Mint.Types.headers()) :: 0 | pos_integer()
