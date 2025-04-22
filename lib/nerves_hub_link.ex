@@ -73,6 +73,12 @@ defmodule NervesHubLink do
   defdelegate reconnect(), to: Socket
 
   @doc """
+  Send download progress percentage for display in web
+  """
+  @spec send_download_progress(non_neg_integer()) :: :ok
+  defdelegate send_download_progress(progress), to: Socket
+
+  @doc """
   Send update progress percentage for display in web
   """
   @spec send_update_progress(non_neg_integer()) :: :ok

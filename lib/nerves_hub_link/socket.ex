@@ -39,6 +39,11 @@ defmodule NervesHubLink.Socket do
     GenServer.cast(__MODULE__, :reconnect)
   end
 
+  @spec send_download_progress(non_neg_integer()) :: :ok
+  def send_download_progress(progress) do
+    GenServer.cast(__MODULE__, {:send_download_progress, progress})
+  end
+
   @spec send_update_progress(non_neg_integer()) :: :ok
   def send_update_progress(progress) do
     GenServer.cast(__MODULE__, {:send_update_progress, progress})
@@ -282,6 +287,12 @@ defmodule NervesHubLink.Socket do
     # See handle_disconnect/2 for the reconnect call once the connection is
     # closed.
     {:noreply, disconnect(socket)}
+  end
+
+  def handle_cast({:send_download_progress, progress}, socket) do
+    # TODO: Add support for more progress reporting variants
+    _ = push(socket, @device_topic, "fwup_progress", %{value: progress})
+    {:noreply, socket}
   end
 
   def handle_cast({:send_update_progress, progress}, socket) do

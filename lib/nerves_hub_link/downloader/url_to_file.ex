@@ -11,8 +11,8 @@ defmodule NervesHubLink.Downloader.UrlToFile do
 
   use GenServer
 
-  alias NervesHubLink.Downloader.UrlToFile
   alias NervesHubLink.Downloader.RetryConfig
+  alias NervesHubLink.Downloader.UrlToFile
 
   require Logger
 
@@ -24,6 +24,7 @@ defmodule NervesHubLink.Downloader.UrlToFile do
             task: nil,
             io: nil,
             time: 0,
+            start_time: 0,
             handler_fun: nil,
             retry_number: 0,
             retry_without_progress: 0,
@@ -53,6 +54,7 @@ defmodule NervesHubLink.Downloader.UrlToFile do
           task: Task.t(),
           io: File.io_device(),
           time: integer(),
+          start_time: integer(),
           handler_fun: event_handler_fun,
           retry_number: non_neg_integer(),
           retry_without_progress: non_neg_integer(),
@@ -72,6 +74,7 @@ defmodule NervesHubLink.Downloader.UrlToFile do
           ref: integer(),
           io: File.io_device(),
           time: integer(),
+          start_time: integer(),
           handler_fun: event_handler_fun,
           retry_number: non_neg_integer(),
           retry_without_progress: non_neg_integer()
@@ -112,8 +115,18 @@ defmodule NervesHubLink.Downloader.UrlToFile do
         handler_fun: fun
       })
 
-    send(self(), :resume)
-    {:ok, state}
+    pid = self()
+
+    case check_disk() do
+      :ok ->
+        send(self(), :resume)
+        {:ok, state}
+
+      :error ->
+        # Gentle exit, it will be handled
+        Process.flag(:trap_exit, true)
+        {:stop, :disk_error}
+    end
   end
 
   def handle_chunk(pid, ref, {:data, data}, {req, res}) do
@@ -131,8 +144,7 @@ defmodule NervesHubLink.Downloader.UrlToFile do
           state
       )
       when chunk_ref == ref do
-    Logger.info("chunk: #{data}")
-    IO.write(io, data)
+    IO.binwrite(io, data)
 
     # Performs state updates and reporting progress
     state = update_progress(state, byte_size(data), response)
@@ -197,10 +209,16 @@ defmodule NervesHubLink.Downloader.UrlToFile do
     url = URI.to_string(state.uri)
 
     case result do
-      {:ok, %{status: 200}} ->
+      {:ok, %{status: status}} when status in [200, 206] ->
         # This means Req has finished the entire download, streaming chunks along the way
-        _ = state.handler_fun.({:complete, path(state.uuid)})
-        {:stop, :normal, state}
+        if state.downloaded_length < state.content_length do
+          Logger.info("[NervesHubLink] Downloaded completed too early, retrying...")
+          _ = state.handler_fun.({:error, :not_complete})
+          {:noreply, reschedule_resume(state)}
+        else
+          _ = state.handler_fun.({:complete, path(state.uuid)})
+          {:stop, :normal, state}
+        end
 
       {:ok, %{status: status}} when status >= 200 and status < 300 ->
         {:noreply, state}
@@ -330,8 +348,6 @@ defmodule NervesHubLink.Downloader.UrlToFile do
     # Accuracy is not very important for this time, we just estimate throughput using it
     time = System.monotonic_time(:millisecond)
 
-    Logger.info("Resuming from #{state.downloaded_length}")
-
     range =
       if state.content_length > 0 do
         "#{state.downloaded_length}-#{state.content_length}"
@@ -339,22 +355,27 @@ defmodule NervesHubLink.Downloader.UrlToFile do
         "#{state.downloaded_length}-"
       end
 
+    Logger.info("Resuming from #{state.downloaded_length}, range #{range}")
+
     t =
       Task.Supervisor.async_nolink(NervesHubLink.TaskSupervisor, fn ->
-        Req.get(URI.to_string(uri),
-          into: &handle_chunk(pid, ref, &1, &2),
-          # Using a range header without known total, is simpler
-          range: "bytes=#{range}",
-          headers: [
-            content_type: "application/octet-stream",
-            x_retry_number: to_string(state.retry_without_progress),
-            user_agent: "NHL/#{Application.spec(:nerves_hub_link)[:vsn]}"
-          ],
-          # Note: We don't use Req's built-in retries because they don't support
-          #       resuming our downloads where we left off.
-          max_retries: 0,
-          receive_timeout: state.retry_args.idle_timeout
-        )
+        res =
+          Req.get(URI.to_string(uri),
+            into: &handle_chunk(pid, ref, &1, &2),
+            # Using a range header without known total, is simpler
+            range: "bytes=#{range}",
+            headers: [
+              content_type: "application/octet-stream",
+              x_retry_number: to_string(state.retry_without_progress),
+              user_agent: "NHL/#{Application.spec(:nerves_hub_link)[:vsn]}"
+            ],
+            # Note: We don't use Req's built-in retries because they don't support
+            #       resuming our downloads where we left off.
+            max_retries: 0,
+            receive_timeout: state.retry_args.idle_timeout
+          )
+
+        res
       end)
 
     {:ok,
@@ -363,15 +384,33 @@ defmodule NervesHubLink.Downloader.UrlToFile do
        | uri: uri,
          task: t,
          ref: ref,
-         time: time
+         time: time,
+         start_time: time
      }}
   end
 
-  defp path(uuid) do
+  @doc """
+  Generate the storage path for a firmware download.
+  """
+  @spec path(uuid :: String.t()) :: String.t()
+  def path(uuid) do
     base_path =
       Application.get_env(:nerves_hub_link, :persist_dir, "/data/nerves_hub_link/firmware")
 
     Path.join(base_path, "#{uuid}.fw")
+  end
+
+  defp clean_others(uuid) do
+    base_path =
+      Application.get_env(:nerves_hub_link, :persist_dir, "/data/nerves_hub_link/firmware")
+
+    Path.join(base_path, "**.fw")
+    |> Path.wildcard()
+    |> Enum.reject(&String.contains?(&1, uuid))
+    |> Enum.each(fn filepath ->
+      Logger.info("[NervesHubLink] Removing old firmware: #{filepath}")
+      File.rm(filepath)
+    end)
   end
 
   defp open_file(firmware_path, size, state) do
@@ -393,7 +432,28 @@ defmodule NervesHubLink.Downloader.UrlToFile do
     end
   end
 
+  defp check_disk() do
+    firmware_path = path("test")
+
+    firmware_path
+    |> Path.dirname()
+    |> File.mkdir_p()
+
+    case File.write(firmware_path, "test-data") do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "[NervesHubLink] Failed to write to disk #{firmware_path} with #{inspect(reason)}. Will not use persisted download method."
+        )
+
+        :error
+    end
+  end
+
   defp check_progress(%UrlToFile{uuid: uuid} = state) do
+    clean_others(uuid)
     firmware_path = path(uuid)
 
     case File.stat(firmware_path) do
@@ -444,12 +504,11 @@ defmodule NervesHubLink.Downloader.UrlToFile do
          (total_size > 0 and downloaded_length == total_size) or
          new_mb > old_mb do
       t = System.monotonic_time(:millisecond)
-      # We make sure we don't divide by zero, occasionally happened in tests
-      bytes_per_second = 1000 / max((t - time) * (new_size - downloaded_length), 1)
+      bytes_per_second = downloaded_length / ((t - state.start_time) / 1000)
 
       # If size is known we also report the percentage
       if total_size > 0 do
-        new_percent = round(new_size / total_size)
+        new_percent = round(new_size / total_size * 100)
         _ = state.handler_fun.({:download_progress, new_percent})
 
         Logger.info(

@@ -59,11 +59,14 @@ defmodule NervesHubLink.Support.RangeRequestPlug do
 
   defp fetch_range_header([{"range", "bytes=" <> range} | _rest]) do
     IO.inspect(range, label: "range")
+
     case String.split(range, "-") do
-      [start, ] ->
+      [start] ->
         {String.to_integer(start), 0}
+
       [start, finish] ->
         {String.to_integer(start), String.to_integer(finish)}
+
       other ->
         IO.inspect(other)
     end
