@@ -11,12 +11,16 @@ defmodule NervesHubLink.Application do
 
   @impl Application
   def start(_type, _args) do
+    # The registry is where non-default instances register their processes
+    # (see `NervesHubLink.Instance`). It is started whether or not the
+    # default tree is, so a `start: :manual` application can run several.
     children =
-      if auto_start?() and connect?() do
-        [NervesHubLink.Supervisor]
-      else
-        []
-      end
+      [NervesHubLink.Instance.registry_spec()] ++
+        if auto_start?() and connect?() do
+          [NervesHubLink.Supervisor]
+        else
+          []
+        end
 
     Supervisor.start_link(children,
       strategy: :one_for_one,

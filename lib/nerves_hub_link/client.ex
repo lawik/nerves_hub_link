@@ -292,7 +292,17 @@ defmodule NervesHubLink.Client do
         do: {client, :reboot, []},
         else: {Nerves.Runtime, :reboot, []}
 
-    _ = spawn(mod, fun, args)
+    # The callback runs in its own process so a slow reboot cannot block the
+    # update manager, but it is given that manager as an ancestor so
+    # `NervesHubLink.Instance.current/0` still knows which connection asked.
+    caller = self()
+
+    _ =
+      spawn(fn ->
+        Process.put(:"$ancestors", [caller | Process.get(:"$ancestors", [])])
+        apply(mod, fun, args)
+      end)
+
     :ok
   end
 

@@ -67,8 +67,43 @@ defmodule NervesHubLink.SupervisorTest do
 
   test "the application does not auto-start children when connect: false" do
     # The test environment sets `connect: false`, so the application-level
-    # supervisor should come up with no children.
+    # supervisor should come up with nothing but the instance registry, which
+    # is always there so a manually supervised tree can register in it.
     assert is_pid(Process.whereis(NervesHubLink.ApplicationSupervisor))
-    assert Supervisor.which_children(NervesHubLink.ApplicationSupervisor) == []
+
+    assert [{NervesHubLink.Registry, _pid, :supervisor, _}] =
+             Supervisor.which_children(NervesHubLink.ApplicationSupervisor)
   end
+
+  test "init/1 scopes every child to the configured instance" do
+    {:ok, {_flags, specs}} = NervesHubLink.Supervisor.init(config: %Config{instance: :fleet_7})
+
+    # Every child either registers under a `{module, :fleet_7}` registry key
+    # or is handed the instance to derive that name itself. Either way no
+    # process may end up on a plain module name, where it would collide with
+    # a default tree in the same VM.
+    assert length(specs) == 7
+
+    for %{start: {mod, _fun, args}} <- specs do
+      assert scoped?(args), "#{inspect(mod)} is not scoped to the instance: #{inspect(args)}"
+    end
+  end
+
+  test "init/1 keeps the default instance on plain module names" do
+    {:ok, {_flags, specs}} = NervesHubLink.Supervisor.init(config: %Config{})
+
+    socket = child_spec_for({:ok, {nil, specs}}, NervesHubLink.Socket)
+    assert %{start: {NervesHubLink.Socket, :start_link, [%Config{instance: :default}]}} = socket
+
+    manager = child_spec_for({:ok, {nil, specs}}, NervesHubLink.UpdateManager)
+    assert %{start: {_, _, [_, [name: NervesHubLink.UpdateManager]]}} = manager
+  end
+
+  defp scoped?([%Config{instance: :fleet_7}]), do: true
+  defp scoped?([%Config{instance: :fleet_7}, opts]), do: via?(opts[:name])
+  defp scoped?([{%FwupConfig{}, _updater} | [opts]]), do: via?(opts[:name])
+  defp scoped?([opts]) when is_list(opts), do: via?(opts[:name]) or opts[:instance] == :fleet_7
+
+  defp via?({:via, Registry, {NervesHubLink.Registry, {_module, :fleet_7}}}), do: true
+  defp via?(_), do: false
 end

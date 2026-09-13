@@ -26,6 +26,21 @@ defmodule NervesHubLink.Supervisor do
   application environment via `NervesHubLink.Configurator.build/0`, which is
   the same behaviour used when the supervisor is auto-started.
 
+  ## Several connections in one VM
+
+  Give each config its own `instance:` and each supervisor its own `:name`
+  and the trees stay apart — see `NervesHubLink.Instance`:
+
+      children =
+        for {config, i} <- Enum.with_index(configs) do
+          Supervisor.child_spec(
+            {NervesHubLink.Supervisor,
+             config: %{config | instance: i},
+             name: NervesHubLink.Instance.name(NervesHubLink.Supervisor, i)},
+            id: {NervesHubLink.Supervisor, i}
+          )
+        end
+
   ## Options
 
     * `:config` - a `NervesHubLink.Configurator.Config` struct to use directly.
@@ -39,10 +54,9 @@ defmodule NervesHubLink.Supervisor do
   alias NervesHubLink.ArchiveManager
   alias NervesHubLink.Configurator
   alias NervesHubLink.Extensions
-  alias NervesHubLink.Extensions.ErrorReports
-  alias NervesHubLink.Extensions.Logging
   alias NervesHubLink.ExtensionsSupervisor
   alias NervesHubLink.FwupConfig
+  alias NervesHubLink.Instance
   alias NervesHubLink.Socket
   alias NervesHubLink.SupportScriptsManager
   alias NervesHubLink.UpdateManager
@@ -57,6 +71,7 @@ defmodule NervesHubLink.Supervisor do
     # An explicit config wins; otherwise fall back to building it from the
     # application environment so the auto-started path is unchanged.
     config = Keyword.get_lazy(opts, :config, &Configurator.build/0)
+    instance = config.instance
 
     fwup_config = %FwupConfig{
       fwup_devpath: config.fwup_devpath,
@@ -65,44 +80,16 @@ defmodule NervesHubLink.Supervisor do
       fwup_env: config.fwup_env
     }
 
-    children =
-      [
-        {DynamicSupervisor, name: ExtensionsSupervisor},
-        Extensions,
-        # Before the socket, and whether or not NervesHub ever attaches
-        # logging: the lines a device writes while booting are the ones worth
-        # having, and by the time an extension is attached they are gone.
-        log_collector(),
-        # Same reasoning, and the same reason it is not started by the
-        # extension: a crash during boot is the one worth having, and it is
-        # long gone by the time NervesHub decides it wants error reports.
-        error_report_collector(),
-        {UpdateManager, {fwup_config, config.updater}},
-        {ArchiveManager, config},
-        {Socket, config},
-        {Task.Supervisor, name: SupportScriptsTaskSupervisor},
-        SupportScriptsManager
-      ]
-      |> List.flatten()
+    children = [
+      {DynamicSupervisor, name: Instance.name(ExtensionsSupervisor, instance)},
+      {Extensions, instance: instance},
+      {UpdateManager, {fwup_config, config.updater, instance}},
+      {ArchiveManager, config},
+      {Socket, config},
+      {Task.Supervisor, name: Instance.name(SupportScriptsTaskSupervisor, instance)},
+      {SupportScriptsManager, instance: instance}
+    ]
 
     Supervisor.init(children, strategy: :one_for_one)
-  end
-
-  # Only for devices that offer the version of logging that collects. 0.0.1
-  # installs its own handler when it attaches and has nothing to collect into.
-  defp log_collector() do
-    if Logging.Batched in Extensions.configured_modules() do
-      [{Logging.Collector, level: Logging.Config.level(), max_lines: Logging.Config.max_lines()}]
-    else
-      []
-    end
-  end
-
-  defp error_report_collector() do
-    if ErrorReports in Extensions.configured_modules() do
-      [{ErrorReports.Collector, max_reports: ErrorReports.Config.max_reports()}]
-    else
-      []
-    end
   end
 end

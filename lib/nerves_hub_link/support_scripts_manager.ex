@@ -9,16 +9,18 @@ defmodule NervesHubLink.SupportScriptsManager do
 
   use GenServer
 
+  alias NervesHubLink.Instance
   alias NervesHubLink.Socket
 
   require Logger
 
   @default_timeout 10_000
 
-  @spec start_link(GenServer.options()) :: GenServer.on_start()
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    opts = Keyword.put_new(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, [], opts)
+    {instance, opts} = Keyword.pop(opts, :instance, Instance.default())
+    opts = Keyword.put_new(opts, :name, Instance.name(__MODULE__, instance))
+    GenServer.start_link(__MODULE__, instance, opts)
   end
 
   @doc """
@@ -31,19 +33,36 @@ defmodule NervesHubLink.SupportScriptsManager do
           handler :: any()
         ) :: :ok
   def start_task(identifier, script, timeout, handler \\ Socket) do
+    start_task(__MODULE__, identifier, script, timeout, handler)
+  end
+
+  @doc false
+  @spec start_task(
+          GenServer.server(),
+          identifier :: String.t(),
+          script :: String.t(),
+          timeout :: non_neg_integer(),
+          handler :: any()
+        ) :: :ok
+  def start_task(manager, identifier, script, timeout, handler) do
     timeout = timeout || @default_timeout
-    GenServer.cast(__MODULE__, {:start_task, script, identifier, timeout, handler})
+    GenServer.cast(manager, {:start_task, script, identifier, timeout, handler})
   end
 
   @impl GenServer
-  def init(_) do
-    {:ok, %{running_scripts: %{}}}
+  def init(instance) do
+    {:ok, %{running_scripts: %{}, instance: instance}}
   end
 
   @impl GenServer
-  def handle_cast({:start_task, script, identifier, timeout, handler}, %{running_scripts: running}) do
+  def handle_cast(
+        {:start_task, script, identifier, timeout, handler},
+        %{running_scripts: running, instance: instance}
+      ) do
+    task_supervisor = Instance.name(SupportScriptsTaskSupervisor, instance)
+
     task =
-      Task.Supervisor.async_nolink(SupportScriptsTaskSupervisor, fn ->
+      Task.Supervisor.async_nolink(task_supervisor, fn ->
         # Inspired from ExUnit.CaptureIO
         # https://github.com/elixir-lang/elixir/blob/main/lib/ex_unit/lib/ex_unit/capture_io.ex
         {:ok, string_io} = StringIO.open("")

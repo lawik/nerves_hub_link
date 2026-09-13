@@ -20,6 +20,7 @@ defmodule NervesHubLink.Socket do
   alias NervesHubLink.Configurator.SharedSecret
   alias NervesHubLink.Extensions
   alias NervesHubLink.FwupConfig
+  alias NervesHubLink.Instance
   alias NervesHubLink.Message.ArchiveInfo
   alias NervesHubLink.Message.UpdateInfo
   alias NervesHubLink.NetworkInterface
@@ -51,7 +52,7 @@ defmodule NervesHubLink.Socket do
 
   @spec start_link(Configurator.Config.t(), GenServer.options()) :: GenServer.on_start()
   def start_link(config, opts \\ []) do
-    opts = Keyword.put_new(opts, :name, __MODULE__)
+    opts = Keyword.put_new(opts, :name, Instance.name(__MODULE__, config.instance))
     GenServer.start_link(__MODULE__, config, opts)
   end
 
@@ -168,13 +169,14 @@ defmodule NervesHubLink.Socket do
 
   @impl Slipstream
   def init(config) do
-    Alarms.set_alarm({NervesHubLink.Disconnected, []})
+    set_alarm(config, {NervesHubLink.Disconnected, []})
 
-    alarm_if_firmware_auto_reverted()
+    alarm_if_firmware_auto_reverted(config)
 
     socket =
       new_socket()
       |> assign(config: config)
+      |> assign(instance: config.instance)
       |> assign(params: config.params)
       |> assign(remote_iex: config.remote_iex)
       |> assign(iex_pid: nil)
@@ -229,7 +231,8 @@ defmodule NervesHubLink.Socket do
   def handle_connect(%{assigns: %{config: config}} = socket) do
     Logger.info("[NervesHubLink] connection to #{config.socket[:url].host} succeeded")
 
-    currently_downloading_uuid = UpdateManager.currently_downloading_uuid()
+    currently_downloading_uuid =
+      UpdateManager.currently_downloading_uuid(sibling(socket, UpdateManager))
 
     device_join_params =
       socket.assigns.params
@@ -247,7 +250,7 @@ defmodule NervesHubLink.Socket do
       |> assign(connected_at: System.monotonic_time(:millisecond))
       |> assign(redirect_count: 0)
 
-    Alarms.clear_alarm(NervesHubLink.Disconnected)
+    clear_alarm(config, NervesHubLink.Disconnected)
 
     Client.connected()
 
@@ -271,7 +274,7 @@ defmodule NervesHubLink.Socket do
   end
 
   def handle_join(@extensions_topic, extensions, socket) do
-    Extensions.attach(extensions)
+    Extensions.attach(sibling(socket, Extensions), extensions)
     Logger.debug("[#{inspect(__MODULE__)}] Joined Extensions channel")
     {:ok, socket}
   end
@@ -312,7 +315,7 @@ defmodule NervesHubLink.Socket do
   def handle_call(:start_update, from, socket) do
     # UpdateManager ignores a second update while one is in flight, so asking
     # NervesHub for another firmware URL would only waste a deployment slot.
-    if UpdateManager.status() == :updating do
+    if UpdateManager.status(sibling(socket, UpdateManager)) == :updating do
       {:reply, {:error, :updating}, socket}
     else
       start_update_request(socket, :start_update, from, "request_update", %{})
@@ -470,20 +473,41 @@ defmodule NervesHubLink.Socket do
 
   def handle_message(@device_topic, "scripts/run", params, socket) do
     # See related handle_info for pushing back the script result
-    :ok = SupportScriptsManager.start_task(params["ref"], params["text"], params["timeout"])
+    :ok =
+      SupportScriptsManager.start_task(
+        sibling(socket, SupportScriptsManager),
+        params["ref"],
+        params["text"],
+        params["timeout"],
+        self()
+      )
+
     {:ok, socket}
   end
 
   def handle_message(@device_topic, "archive", params, socket) do
     {:ok, info} = ArchiveInfo.parse(params)
-    _ = ArchiveManager.apply_archive(info, socket.assigns.config.archive_public_keys)
+
+    _ =
+      ArchiveManager.apply_archive(
+        sibling(socket, ArchiveManager),
+        info,
+        socket.assigns.config.archive_public_keys
+      )
+
     {:ok, socket}
   end
 
   def handle_message(@device_topic, "update", update, socket) do
     case UpdateInfo.parse(update) do
       {:ok, %UpdateInfo{} = info} ->
-        _ = UpdateManager.apply_update(info, socket.assigns.config.fwup_public_keys)
+        _ =
+          UpdateManager.apply_update(
+            sibling(socket, UpdateManager),
+            info,
+            socket.assigns.config.fwup_public_keys
+          )
+
         # The same message answers a `request_update` and carries a deployment's
         # own push; resolving is a no-op when nothing asked.
         {:ok, resolve_update_request(socket, :start_update, :ok)}
@@ -538,7 +562,8 @@ defmodule NervesHubLink.Socket do
   # declares a version nothing can serve, and never declares an extension an
   # operator has switched off.
   def handle_message(@device_topic, "extensions:get", payload, socket) do
-    {:ok, join(socket, @extensions_topic, Extensions.offer(payload["extensions"]))}
+    offer = Extensions.offer(sibling(socket, Extensions), payload["extensions"])
+    {:ok, join(socket, @extensions_topic, offer)}
   end
 
   ##
@@ -601,7 +626,7 @@ defmodule NervesHubLink.Socket do
   end
 
   def handle_message(@extensions_topic, event, payload, socket) do
-    Extensions.handle_event(event, payload)
+    Extensions.handle_event(sibling(socket, Extensions), event, payload)
     {:ok, socket}
   end
 
@@ -756,7 +781,7 @@ defmodule NervesHubLink.Socket do
 
   @impl Slipstream
   def handle_reply(ref, {:error, "detach"}, socket) do
-    Extensions.detach(ref)
+    Extensions.detach(sibling(socket, Extensions), ref)
     {:ok, socket}
   end
 
@@ -772,7 +797,7 @@ defmodule NervesHubLink.Socket do
   @impl Slipstream
   def handle_disconnect(reason, socket) do
     _ = Client.handle_error(reason)
-    :alarm_handler.set_alarm({NervesHubLink.Disconnected, [reason: reason]})
+    set_alarm(socket.assigns.config, {NervesHubLink.Disconnected, [reason: reason]})
     channel_config = %{socket.channel_config | reconnect_after_msec: Client.reconnect_backoff()}
 
     channel_config =
@@ -938,12 +963,27 @@ defmodule NervesHubLink.Socket do
   defp update_request_error("no_deployment_group"), do: :no_deployment_group
   defp update_request_error(_other), do: :error
 
-  defp alarm_if_firmware_auto_reverted() do
+  defp alarm_if_firmware_auto_reverted(config) do
     if Client.firmware_auto_revert_detected?() do
-      Alarms.set_alarm({NervesHubLink.FirmwareReverted, []})
+      set_alarm(config, {NervesHubLink.FirmwareReverted, []})
     else
       :ok
     end
+  end
+
+  # The other processes of this connection, by instance. The default instance
+  # resolves to the plain module names every existing caller already uses.
+  defp sibling(socket, module), do: Instance.name(module, socket.assigns.instance)
+
+  # Alarms are VM-wide, so only the device's own connection raises them. A
+  # harness running many instances would otherwise have them all set and
+  # clear the same alarm, and `:alarm_handler` keeps every duplicate.
+  defp set_alarm(%{instance: instance}, alarm) do
+    if instance == Instance.default(), do: Alarms.set_alarm(alarm), else: :ok
+  end
+
+  defp clear_alarm(%{instance: instance}, alarm) do
+    if instance == Instance.default(), do: Alarms.clear_alarm(alarm), else: :ok
   end
 
   @doc false

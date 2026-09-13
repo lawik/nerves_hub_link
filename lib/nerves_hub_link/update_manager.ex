@@ -19,6 +19,7 @@ defmodule NervesHubLink.UpdateManager do
   alias NervesHubLink.Alarms
   alias NervesHubLink.Client
   alias NervesHubLink.FwupConfig
+  alias NervesHubLink.Instance
   alias NervesHubLink.Message.UpdateInfo
   alias NervesHubLink.UpdateManager
   alias NervesHubLink.UpdateManager.Updater
@@ -82,10 +83,17 @@ defmodule NervesHubLink.UpdateManager do
   end
 
   @doc false
-  @spec child_spec({FwupConfig.t(), Updater.t()}) :: Supervisor.child_spec()
+  @spec child_spec({FwupConfig.t(), Updater.t()} | {FwupConfig.t(), Updater.t(), Instance.t()}) ::
+          Supervisor.child_spec()
   def child_spec({%FwupConfig{} = fwup_config, updater}) do
+    child_spec({fwup_config, updater, Instance.default()})
+  end
+
+  def child_spec({%FwupConfig{} = fwup_config, updater, instance}) do
     %{
-      start: {__MODULE__, :start_link, [{fwup_config, updater}, [name: __MODULE__]]},
+      start:
+        {__MODULE__, :start_link,
+         [{fwup_config, updater}, [name: Instance.name(__MODULE__, instance)]]},
       id: __MODULE__
     }
   end
@@ -138,7 +146,7 @@ defmodule NervesHubLink.UpdateManager do
         {:EXIT, updater_pid, {:shutdown, :update_complete}},
         %State{updater_pid: updater_pid} = state
       ) do
-    Alarms.clear_alarm(NervesHubLink.UpdateInProgress)
+    clear_alarm(NervesHubLink.UpdateInProgress)
     Logger.info("[NervesHubLink:UpdateManager] Update completed successfully")
     NervesHubLink.send_update_status(:completed)
     Client.initiate_reboot()
@@ -149,7 +157,7 @@ defmodule NervesHubLink.UpdateManager do
         {:EXIT, updater_pid, {:shutdown, {:error, reason}}},
         %State{updater_pid: updater_pid} = state
       ) do
-    Alarms.clear_alarm(NervesHubLink.UpdateInProgress)
+    clear_alarm(NervesHubLink.UpdateInProgress)
     Logger.error("[NervesHubLink:UpdateManager] Update failed with reason : #{inspect(reason)}")
     NervesHubLink.send_update_status({:failed, "Update failed : #{inspect(reason)}"})
     {:noreply, %State{state | status: :idle, updater_pid: nil, update_info: nil}}
@@ -159,7 +167,7 @@ defmodule NervesHubLink.UpdateManager do
         {:EXIT, updater_pid, {:shutdown, {:download_error, reason}}},
         %State{updater_pid: updater_pid} = state
       ) do
-    Alarms.clear_alarm(NervesHubLink.UpdateInProgress)
+    clear_alarm(NervesHubLink.UpdateInProgress)
     Logger.error("[NervesHubLink:UpdateManager] Download failed with reason : #{inspect(reason)}")
     NervesHubLink.send_update_status({:failed, "Download failed : #{inspect(reason)}"})
     {:noreply, %State{state | status: :idle, updater_pid: nil, update_info: nil}}
@@ -169,14 +177,14 @@ defmodule NervesHubLink.UpdateManager do
         {:EXIT, updater_pid, {:shutdown, {:fwup_error, reason}}},
         %State{updater_pid: updater_pid} = state
       ) do
-    Alarms.clear_alarm(NervesHubLink.UpdateInProgress)
+    clear_alarm(NervesHubLink.UpdateInProgress)
     Logger.error("[NervesHubLink:UpdateManager] FWUP failed with reason : #{inspect(reason)}")
     NervesHubLink.send_update_status({:failed, "FWUP error : #{inspect(reason)}"})
     {:noreply, %State{state | status: :idle, updater_pid: nil, update_info: nil}}
   end
 
   def handle_info({:EXIT, _, _} = msg, state) do
-    Alarms.clear_alarm(NervesHubLink.UpdateInProgress)
+    clear_alarm(NervesHubLink.UpdateInProgress)
 
     Logger.error(
       "[NervesHubLink:UpdateManager] Unexpected :EXIT : pid #{inspect(msg)}, state #{inspect(state)}"
@@ -230,7 +238,7 @@ defmodule NervesHubLink.UpdateManager do
         {:ok, updater_pid} =
           state.updater.start_update(update_info, state.fwup_config, fwup_public_keys)
 
-        Alarms.set_alarm({NervesHubLink.UpdateInProgress, []})
+        set_alarm({NervesHubLink.UpdateInProgress, []})
 
         %State{state | status: :updating, updater_pid: updater_pid, update_info: update_info}
 
@@ -265,5 +273,16 @@ defmodule NervesHubLink.UpdateManager do
 
         state
     end
+  end
+
+  # Alarms are VM-wide, so only the device's own connection raises them: a
+  # harness running many instances would otherwise have them all fighting
+  # over one alarm.
+  defp set_alarm(alarm) do
+    if Instance.current() == Instance.default(), do: Alarms.set_alarm(alarm), else: :ok
+  end
+
+  defp clear_alarm(alarm) do
+    if Instance.current() == Instance.default(), do: Alarms.clear_alarm(alarm), else: :ok
   end
 end

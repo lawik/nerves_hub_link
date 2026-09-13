@@ -40,6 +40,55 @@ The default (`start: :auto`) and the manual mode share the same code path, so
 switching between them does not change how the connection is configured — only
 who is responsible for starting it.
 
+### Several connections in one VM
+
+A device runs one connection, and its processes register under their module
+names (`NervesHubLink.Socket`, `NervesHubLink.UpdateManager`, ...). A test
+harness, a fleet simulator or a gateway fronting several devices may want more
+than one, and those names would collide.
+
+Give each connection its own `instance:` in its config, and each supervisor
+its own `:name`, and the trees stay apart. Every process then registers in
+`NervesHubLink.Registry` under `{module, instance}` and the processes of one
+tree find each other through `NervesHubLink.Instance.name/2`:
+
+```elixir
+config :nerves_hub_link, start: :manual
+
+base = NervesHubLink.Configurator.build()
+
+children =
+  for {identifier, i} <- Enum.with_index(device_identifiers) do
+    config = %{
+      base
+      | instance: i,
+        shared_secret: Keyword.put(base.shared_secret, :identifier, identifier),
+        params: Map.put(base.params, "nerves_fw_uuid", uuid_for(identifier))
+    }
+
+    Supervisor.child_spec(
+      {NervesHubLink.Supervisor,
+       config: config, name: NervesHubLink.Instance.name(NervesHubLink.Supervisor, i)},
+      id: {NervesHubLink.Supervisor, i}
+    )
+  end
+```
+
+Ask a particular connection things by naming its socket:
+
+```elixir
+NervesHubLink.connected?(NervesHubLink.Instance.name(NervesHubLink.Socket, 3))
+```
+
+The `:default` instance is what you get without configuring one, and it keeps
+the plain module names, so nothing changes for a device with one connection.
+What does not scale out: alarms (raised only by the default instance, since
+they are VM-wide), the `NervesHubLink.Client` callbacks (one module, called
+for every instance), the logging and error-report extensions (they install
+VM-wide handlers), and the public functions on extension modules such as
+`NervesHubLink.Extensions.Health.send_report/0`, which address the default
+instance.
+
 ## Runtime configuration
 
 `NervesHubLink` also supports runtime configuration via the `NervesHubLink.Configurator` behavior. This is called during application startup to build the configuration that is to be used for the connection. When implementing the behavior, you'll receive the initial default config read in from the application environment and you can modify it however you need.

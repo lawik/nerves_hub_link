@@ -74,8 +74,12 @@ defmodule NervesHubLink.ArchiveManager do
   @doc false
   @spec child_spec(map()) :: Supervisor.child_spec()
   def child_spec(args) do
+    instance = Map.get(args, :instance, NervesHubLink.Instance.default())
+
     %{
-      start: {__MODULE__, :start_link, [args, [name: __MODULE__]]},
+      start:
+        {__MODULE__, :start_link,
+         [args, [name: NervesHubLink.Instance.name(__MODULE__, instance)]]},
       id: __MODULE__
     }
   end

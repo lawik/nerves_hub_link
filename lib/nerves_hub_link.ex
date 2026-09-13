@@ -21,6 +21,7 @@ defmodule NervesHubLink do
   """
 
   alias NervesHubLink.Extensions.ErrorReports
+  alias NervesHubLink.Instance
   alias NervesHubLink.Socket
   alias NervesHubLink.UpdateManager
 
@@ -101,7 +102,17 @@ defmodule NervesHubLink do
   Send an update status to web
   """
   @spec send_update_status(GenServer.server(), update_status()) :: :ok
-  defdelegate send_update_status(server \\ Socket, status), to: Socket
+  def send_update_status(server \\ nil, status)
+
+  # Called from updaters and downloaders that were started under a
+  # connection's tree. Which tree is worked out from the caller's ancestry
+  # (see `NervesHubLink.Instance.current/0`), so the default instance still
+  # goes to `NervesHubLink.Socket` and any other reaches its own socket.
+  def send_update_status(nil, status) do
+    Socket.send_update_status(Instance.name(Socket, Instance.current()), status)
+  end
+
+  def send_update_status(server, status), do: Socket.send_update_status(server, status)
 
   @doc """
   Send a file to the connected console

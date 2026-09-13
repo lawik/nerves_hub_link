@@ -51,6 +51,7 @@ defmodule NervesHubLink.Configurator do
               fwup_task: "upgrade",
               heartbeat_interval_msec: 30_000,
               host: "localhost",
+              instance: NervesHubLink.Instance.default(),
               nerves_key: [],
               params: %{},
               rejoin_after: [5_000],
@@ -81,6 +82,7 @@ defmodule NervesHubLink.Configurator do
             fwup_task: String.t(),
             heartbeat_interval_msec: integer(),
             host: String.t(),
+            instance: NervesHubLink.Instance.t(),
             nerves_key: any(),
             params: map(),
             rejoin_after: integer() | [integer()],
@@ -102,11 +104,33 @@ defmodule NervesHubLink.Configurator do
 
   @fwup_devpath "nerves_fw_devpath"
 
-  @spec build :: Config.t()
-  def build() do
-    configurator = fetch_configurator()
+  @doc """
+  Build the connection configuration.
 
-    base_config()
+  Starts from the `:nerves_hub_link` application environment, runs it through
+  the configurator (see `fetch_configurator/0`) and fills in the socket, SSL
+  and signing-key details.
+
+  `overrides` are merged over the application environment before any of that
+  happens, so they take part in it: a `:shared_secret` override is signed
+  into the connection headers, a `:host` override becomes the socket URL, and
+  `:params` given here are merged over what `Nerves.Runtime.KV` reports. That
+  is what lets one VM build the configuration for several devices, each with
+  its own identifier and firmware metadata, from one application environment:
+
+      NervesHubLink.Configurator.build(
+        instance: 3,
+        shared_secret: [identifier: "virtual-0003"],
+        params: %{"nerves_fw_uuid" => uuid}
+      )
+  """
+  @spec build(keyword() | map()) :: Config.t()
+  def build(overrides \\ []) do
+    overrides = Enum.to_list(overrides)
+    configurator = overrides[:configurator] || fetch_configurator()
+
+    overrides
+    |> base_config()
     |> configurator.build()
     |> add_socket_opts()
     |> add_fwup_public_keys()
@@ -152,8 +176,9 @@ defmodule NervesHubLink.Configurator do
     %{config | socket: socket}
   end
 
-  defp base_config() do
-    base = struct(Config, Application.get_all_env(:nerves_hub_link))
+  defp base_config(overrides) do
+    env = Keyword.merge(Application.get_all_env(:nerves_hub_link), overrides)
+    base = struct(Config, env)
 
     connection_config_warnings(base)
 
@@ -176,8 +201,12 @@ defmodule NervesHubLink.Configurator do
 
     fwup_devpath = KV.get(@fwup_devpath)
 
+    # Configured params win over the KV's: a device's firmware metadata is
+    # the KV's to report, but a harness standing in for many devices has to
+    # be able to say which firmware each one is running.
     params =
       KV.get_all_active()
+      |> Map.merge(base.params)
       |> Map.put("fwup_version", fwup_version())
       |> Map.put("device_api_version", @device_api_version)
       |> Map.put("console_version", @console_version)
