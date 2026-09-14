@@ -485,7 +485,10 @@ defmodule NervesHubLink.Socket do
       {:ok, %UpdateInfo{} = info} ->
         _ = UpdateManager.apply_update(info, socket.assigns.config.fwup_public_keys)
         # The same message answers a `request_update` and carries a deployment's
-        # own push; resolving is a no-op when nothing asked.
+        # or an operator's own push, and nothing on the wire tells them apart. Any
+        # update that arrives while a request is pending fulfils it: the device
+        # is updating either way, which is what the caller asked for. Resolving
+        # is a no-op when nothing asked.
         {:ok, resolve_update_request(socket, :start_update, :ok)}
 
       error ->
@@ -498,18 +501,29 @@ defmodule NervesHubLink.Socket do
   end
 
   def handle_message(@device_topic, "update_mode", params, socket) do
+    mode = parse_update_mode(params["mode"])
+
     socket =
       socket
-      |> assign(update_mode: parse_update_mode(params["mode"]))
+      |> assign(update_mode: mode)
       |> assign(managed_updates_allowed: params["managed_updates_allowed"] == true)
 
-    result =
-      case params["error"] do
-        nil -> :ok
-        error -> {:error, update_request_error(error)}
-      end
+    # NervesHub also reports the mode unasked: on join, and whenever an operator
+    # changes the mode or the grant. The answer to a `set_update_mode` is the
+    # report that carries an error or the mode that was asked for; any other
+    # report has done its work in the assigns above and must not stand in for
+    # the answer.
+    case {params["error"], socket.assigns.pending_update_requests[:set_update_mode]} do
+      {nil, {_from, _timer, %{mode: ^mode}}} ->
+        {:ok, resolve_update_request(socket, :set_update_mode, :ok)}
 
-    {:ok, resolve_update_request(socket, :set_update_mode, result)}
+      {nil, _not_the_answer} ->
+        {:ok, socket}
+
+      {error, _pending} ->
+        {:ok,
+         resolve_update_request(socket, :set_update_mode, {:error, update_request_error(error)})}
+    end
   end
 
   def handle_message(@device_topic, "update_available", params, socket) do
@@ -530,7 +544,18 @@ defmodule NervesHubLink.Socket do
         {reason, _} -> {:error, update_request_error(reason)}
       end
 
-    {:ok, resolve_update_request(socket, :start_update, result)}
+    if Map.has_key?(socket.assigns.pending_update_requests, :start_update) do
+      {:ok, resolve_update_request(socket, :start_update, result)}
+    else
+      # The request was already resolved: an update pushed for another reason
+      # fulfilled it before this answer arrived, or it timed out. The caller has
+      # been answered, so the refusal has nowhere to go but the log.
+      Logger.warning(
+        "[NervesHubLink] NervesHub refused an update request that is no longer pending: #{inspect(params)}"
+      )
+
+      {:ok, socket}
+    end
   end
 
   # The platform's half of the negotiation: which extensions it has, and which
@@ -884,7 +909,9 @@ defmodule NervesHubLink.Socket do
 
   # A device-initiated request is answered by a separate message rather than a
   # reply to the push, so the caller is parked here until that message arrives —
-  # or until the timeout does, so a lost answer cannot leak a stuck caller.
+  # or until the timeout does, so a lost answer cannot leak a stuck caller. The
+  # payload is kept with the caller so a handler can tell the answer from a
+  # message NervesHub pushed of its own accord.
   defp start_update_request(socket, kind, from, event, payload) do
     cond do
       not joined?(socket, @device_topic) ->
@@ -899,7 +926,8 @@ defmodule NervesHubLink.Socket do
             timer =
               Process.send_after(self(), {:update_request_timeout, kind}, @update_request_timeout)
 
-            pending = Map.put(socket.assigns.pending_update_requests, kind, {from, timer})
+            pending =
+              Map.put(socket.assigns.pending_update_requests, kind, {from, timer, payload})
 
             {:noreply, assign(socket, pending_update_requests: pending)}
 
@@ -914,7 +942,7 @@ defmodule NervesHubLink.Socket do
       {nil, _pending} ->
         socket
 
-      {{from, timer}, pending} ->
+      {{from, timer, _payload}, pending} ->
         _ = Process.cancel_timer(timer)
         GenServer.reply(from, result)
         assign(socket, pending_update_requests: pending)

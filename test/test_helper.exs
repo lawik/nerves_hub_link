@@ -17,4 +17,6 @@ Application.put_env(:nerves_hub_link, :client, NervesHubLink.ClientMock)
 # This only changes how long a *failing* assertion waits. An assertion that is
 # going to pass returns as soon as its message lands, so the suite is no slower
 # for it.
-ExUnit.start(capture_log: true, assert_receive_timeout: 2_000)
+# `:pending` marks a test whose expectation is right but needs a change outside
+# this library before it can pass; the test says what.
+ExUnit.start(capture_log: true, assert_receive_timeout: 2_000, exclude: [:pending])
