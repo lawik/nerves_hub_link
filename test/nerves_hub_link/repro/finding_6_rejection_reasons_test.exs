@@ -49,7 +49,10 @@ defmodule NervesHubLink.Repro.Finding6RejectionReasonsTest do
         id: UpdateManager,
         start:
           {UpdateManager, :start_link,
-           [{%FwupConfig{fwup_devpath: "/tmp/fwup_output", fwup_task: "upgrade"}, UpdaterMock}, [name: UpdateManager]]}
+           [
+             {%FwupConfig{fwup_devpath: "/tmp/fwup_output", fwup_task: "upgrade"}, UpdaterMock},
+             [name: UpdateManager]
+           ]}
       })
 
     socket = start_socket(data_path)
@@ -81,7 +84,11 @@ defmodule NervesHubLink.Repro.Finding6RejectionReasonsTest do
       rejoin_after: [1_000],
       remote_iex: false,
       remote_iex_timeout: 300,
-      socket: [url: URI.parse("ws://localhost:4000/socket/websocket"), reconnect_after_msec: [1_000], test_mode?: true],
+      socket: [
+        url: URI.parse("ws://localhost:4000/socket/websocket"),
+        reconnect_after_msec: [1_000],
+        test_mode?: true
+      ],
       ssl: []
     }
 

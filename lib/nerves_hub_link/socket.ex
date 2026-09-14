@@ -142,6 +142,11 @@ defmodule NervesHubLink.Socket do
 
   @doc """
   Ask NervesHub for the firmware itself, and start applying it.
+
+  NervesHub refuses with `:no_deployment_group`, `:no_update` or
+  `:already_updating` — the last means it still holds an inflight update for
+  this device; ask again later. `{:busy, minutes}` is reserved for a NervesHub
+  that paces device requests. See `NervesHubLink.start_update/1`.
   """
   @spec start_update(GenServer.server()) :: :ok | {:error, term()}
   def start_update(server \\ __MODULE__) do
@@ -936,6 +941,7 @@ defmodule NervesHubLink.Socket do
   defp update_request_error("unknown_mode"), do: :unknown_mode
   defp update_request_error("no_update"), do: :no_update
   defp update_request_error("no_deployment_group"), do: :no_deployment_group
+  defp update_request_error("already_updating"), do: :already_updating
   defp update_request_error(_other), do: :error
 
   defp alarm_if_firmware_auto_reverted() do

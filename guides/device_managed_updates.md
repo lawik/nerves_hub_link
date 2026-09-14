@@ -60,22 +60,29 @@ The split matters. Firmware URLs are signed and time limited, so a device that
 checked at 02:00 and updated at 04:00 would find a dead link. The URL is fetched
 at the moment it is going to be used.
 
-### Being told to wait
+### Being refused
 
-Deployment groups pace their rollouts, and a device asking for firmware takes a
-slot in that pacing like any other update. A fleet that all wakes at 03:00 local
-would otherwise walk straight past it.
+NervesHub answers a device's request straight away — the deployment group's
+rollout pacing does not apply, because a device that manages its own updates has
+already decided this is a moment it can afford one. It refuses with one of:
+
+* `{:error, :already_updating}` — NervesHub still holds an inflight update for
+  this device, and there is only one of those per device. Ask again later; a
+  device that is not really updating has that record expired for it soon enough.
+* `{:error, :no_update}` — nothing newer than what is running.
+* `{:error, :no_deployment_group}` — the device is not in a deployment group.
 
 ```elixir
 case NervesHubLink.start_update() do
   :ok -> :updating
-  {:error, {:busy, minutes}} -> reschedule_in(minutes)
+  {:error, :already_updating} -> reschedule_in(15)
   {:error, reason} -> Logger.warning("update refused: #{inspect(reason)}")
 end
 ```
 
-Treat `{:busy, minutes}` as "not now" rather than "not ever", and do not retry
-sooner than it says.
+Treat `:already_updating` as "not now" rather than "not ever". A NervesHub that
+paces device requests would answer `{:error, {:busy, minutes}}` instead, and
+should not be asked again sooner than that.
 
 `{:error, :updating}` means this device is already applying firmware; there is
 nothing to do but wait.
@@ -165,9 +172,9 @@ defmodule MyApp.UpdateWindow do
       :ok ->
         Logger.info("firmware update started")
 
-      {:error, {:busy, minutes}} ->
-        # The deployment group is at its concurrent update limit.
-        Process.send_after(self(), :maybe_update, :timer.minutes(minutes))
+      {:error, :already_updating} ->
+        # NervesHub still holds an inflight update for this device.
+        Process.send_after(self(), :maybe_update, :timer.minutes(15))
 
       {:error, reason} ->
         Logger.warning("firmware update refused: #{inspect(reason)}")
