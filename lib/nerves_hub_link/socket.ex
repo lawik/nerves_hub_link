@@ -760,6 +760,20 @@ defmodule NervesHubLink.Socket do
     {:ok, socket}
   end
 
+  # Phoenix replies to every push that carries a ref, and not only to the
+  # ones we wait on: `{:error, %{"reason" => "unmatched topic"}}` comes back
+  # for a push that reached the server after its channel process died. None
+  # of those replies are anything to act on, so log them and carry on.
+  def handle_reply(ref, {:error, reason}, socket) do
+    Logger.warning("[NervesHubLink] Error reply to push #{inspect(ref)}: #{inspect(reason)}")
+    {:ok, socket}
+  end
+
+  def handle_reply(ref, reply, socket) do
+    Logger.debug("[NervesHubLink] Reply to push #{inspect(ref)}: #{inspect(reply)}")
+    {:ok, socket}
+  end
+
   @impl Slipstream
   def handle_topic_close(topic, reason, socket) when reason != :left do
     if topic == @device_topic do

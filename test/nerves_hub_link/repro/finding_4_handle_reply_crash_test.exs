@@ -49,7 +49,10 @@ defmodule NervesHubLink.Repro.Finding4HandleReplyCrashTest do
         id: UpdateManager,
         start:
           {UpdateManager, :start_link,
-           [{%FwupConfig{fwup_devpath: "/tmp/fwup_output", fwup_task: "upgrade"}, UpdaterMock}, [name: UpdateManager]]}
+           [
+             {%FwupConfig{fwup_devpath: "/tmp/fwup_output", fwup_task: "upgrade"}, UpdaterMock},
+             [name: UpdateManager]
+           ]}
       })
 
     _ = start_supervised!({Task.Supervisor, name: Repro4Tasks})
@@ -78,7 +81,11 @@ defmodule NervesHubLink.Repro.Finding4HandleReplyCrashTest do
     assert Process.whereis(Socket) == pid, "the socket was restarted by its supervisor"
 
     # The parked caller is still owed its answer.
-    push(socket, @device_topic, "update_available", %{"available" => false, "firmware_meta" => nil})
+    push(socket, @device_topic, "update_available", %{
+      "available" => false,
+      "firmware_meta" => nil
+    })
+
     assert {:ok, {:ok, %{available?: false}}} = Task.yield(task, 2_000)
   end
 
@@ -94,7 +101,11 @@ defmodule NervesHubLink.Repro.Finding4HandleReplyCrashTest do
       rejoin_after: [1_000],
       remote_iex: false,
       remote_iex_timeout: 300,
-      socket: [url: URI.parse("ws://localhost:4000/socket/websocket"), reconnect_after_msec: [1_000], test_mode?: true],
+      socket: [
+        url: URI.parse("ws://localhost:4000/socket/websocket"),
+        reconnect_after_msec: [1_000],
+        test_mode?: true
+      ],
       ssl: []
     }
 
