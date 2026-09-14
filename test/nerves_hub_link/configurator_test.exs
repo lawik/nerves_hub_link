@@ -43,4 +43,23 @@ defmodule NervesHubLink.ConfiguratorTest do
     # cspell:disable-next-line
     assert ["thisisavalidkey=="] == config.fwup_public_keys
   end
+
+  test "inspecting a config leaves the credentials out" do
+    # The test config's SSL options carry "ima key!", and build/0 copies them
+    # into the socket options as well.
+    config = %{
+      NervesHubLink.Configurator.build()
+      | shared_secret: [
+          product_key: "nhp_the_product_key",
+          product_secret: "nhps_the_product_secret"
+        ]
+    }
+
+    inspected = inspect(config)
+
+    refute inspected =~ "nhps_the_product_secret"
+    refute inspected =~ "nhp_the_product_key"
+    refute inspected =~ "ima key!"
+    assert inspected =~ "fwup_devpath"
+  end
 end

@@ -34,8 +34,14 @@ defmodule NervesHubLink.Configurator do
   defmodule Config do
     @moduledoc """
     Data structure for holding configuration information provided by the configurator.
+
+    Fields that carry credentials - the shared secret, the SSL options and
+    the `socket` options they are copied into, and the NervesKey and TPM
+    settings - are left out when a config is inspected, so they don't end up
+    in the log when a process holding one crashes.
     """
 
+    @derive {Inspect, except: [:nerves_key, :shared_secret, :socket, :ssl, :tpm]}
     defstruct archive_public_keys: [],
               compress: true,
               connect: true,
